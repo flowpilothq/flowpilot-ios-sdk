@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  FlowPilotSDK Privacy Manifest (PrivacyInfo.xcprivacy)
+
+  Apple requires third-party SDKs to ship a privacy manifest. This file
+  describes the data FlowPilotSDK collects and the required-reason APIs it uses,
+  so that apps integrating the SDK pass App Store review.
+
+  Baseline declarations:
+   - Required-reason API: UserDefaults only. The SDK stores its own session id
+     and a batched analytics queue in the host app's UserDefaults — data that is
+     accessible only to the app itself. Reason code CA92.1.
+   - Data collected: Product Interaction (which flows/screens the user engages
+     with), sent to the FlowPilot backend for App Functionality and Analytics.
+     Not used for tracking; no IDFA/IDFV is accessed.
+
+  Integrator responsibility: if your app passes a user identifier into the SDK
+  context (e.g. `user.id`) so it is attached to analytics, you should treat the
+  Product Interaction data as linked to identity and add a User ID entry to
+  reconcile this manifest with your app's overall App Privacy declaration.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSPrivacyTracking</key>
+    <false/>
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyCollectedDataType</key>
+            <string>NSPrivacyCollectedDataTypeProductInteraction</string>
+            <key>NSPrivacyCollectedDataTypeLinked</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypeTracking</key>
+            <false/>
+            <key>NSPrivacyCollectedDataTypePurposes</key>
+            <array>
+                <string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+                <string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -1,0 +1,501 @@
+import Foundation
+import Combine
+
+// MARK: - Navigation Transition Info
+
+/// Metadata about a screen transition, published alongside screen changes.
+struct NavigationTransitionInfo: Sendable {
+    /// Whether this navigation is going backward (goBack).
+    let isBack: Bool
+    /// The edge that was traversed (if any). Carries potential per-edge transition config.
+    let traversedEdge: FlowEdge?
+    /// The source screen we're navigating away from.
+    let sourceScreen: ScreenNode?
+    /// The destination screen we're navigating to.
+    let destinationScreen: ScreenNode?
+}
+
+// MARK: - Navigation History Entry
+
+/// An entry in the navigation history stack, preserving the edge used for back-reversal.
+struct NavigationHistoryEntry: Sendable {
+    let nodeId: String
+    /// The edge that was used to navigate away from this screen (for back-reversal).
+    let forwardEdge: FlowEdge?
+}
+
+// MARK: - Navigation State
+
+/// Current state of flow navigation
+struct NavigationState: Sendable {
+    var currentNodeId: String
+    var history: [NavigationHistoryEntry]
+    var experimentAssignments: [String: String]
+    var screenIndex: Int
+
+    init(entryNodeId: String) {
+        self.currentNodeId = entryNodeId
+        self.history = []
+        self.experimentAssignments = [:]
+        self.screenIndex = 0
+    }
+}
+
+// MARK: - Navigation Controller
+
+/// Controls navigation through the flow graph
+final class NavigationController: @unchecked Sendable {
+    // MARK: - Properties
+
+    private var flow: FlowDefinition
+    private let variableStore: VariableStore
+    private var state: NavigationState
+    private let lock = NSLock()
+
+    // Node lookup caches
+    private var nodesById: [String: FlowNode]
+    private var edgesByFromNode: [String: [FlowEdge]]
+    private var screenNodes: [ScreenNode]
+
+    // Publishers
+    private let navigationSubject = PassthroughSubject<NavigationEvent, Never>()
+    var navigationPublisher: AnyPublisher<NavigationEvent, Never> {
+        navigationSubject.eraseToAnyPublisher()
+    }
+
+    // Flow closure callback
+    var onFlowClose: ((FlowOutcome) -> Void)?
+
+    // Direct callback for screen display (backup for Combine)
+    var onScreenDisplayed: ((ScreenNode, Int, NavigationTransitionInfo) -> Void)?
+
+    // MARK: - Initialization
+
+    init(flow: FlowDefinition, variableStore: VariableStore) {
+        self.flow = flow
+        self.variableStore = variableStore
+        self.state = NavigationState(entryNodeId: flow.entryNodeId)
+
+        // Build lookup caches
+        var nodeDict: [String: FlowNode] = [:]
+        var screenList: [ScreenNode] = []
+        for node in flow.nodes {
+            nodeDict[node.id] = node
+            if case .screen(let screenNode) = node {
+                screenList.append(screenNode)
+            }
+        }
+        self.nodesById = nodeDict
+        self.screenNodes = screenList
+
+        var edgeDict: [String: [FlowEdge]] = [:]
+        for edge in flow.edges {
+            if edgeDict[edge.fromNodeId] == nil {
+                edgeDict[edge.fromNodeId] = []
+            }
+            edgeDict[edge.fromNodeId]?.append(edge)
+        }
+        self.edgesByFromNode = edgeDict
+    }
+
+    // MARK: - Public API
+
+    /// Get the current node
+    var currentNode: FlowNode? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nodesById[state.currentNodeId]
+    }
+
+    /// Get the current screen node (if current node is a screen)
+    var currentScreen: ScreenNode? {
+        guard let node = currentNode, case .screen(let screen) = node else {
+            return nil
+        }
+        return screen
+    }
+
+    /// Get the current node ID
+    var currentNodeId: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.currentNodeId
+    }
+
+    /// Get the current screen index
+    var currentScreenIndex: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.screenIndex
+    }
+
+    /// Can we go back?
+    var canGoBack: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !state.history.isEmpty
+    }
+
+    /// Get navigation history (node IDs only, for backward compatibility).
+    var history: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.history.map { $0.nodeId }
+    }
+
+    /// Get experiment assignments
+    var experimentAssignments: [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.experimentAssignments
+    }
+
+    /// Start the flow (process entry node)
+    func start() {
+        Logger.shared.debug("NavigationController.start() - entryNodeId: '\(flow.entryNodeId)', nodes count: \(nodesById.count)")
+        if nodesById[flow.entryNodeId] == nil {
+            Logger.shared.error("Entry node not found! Available node IDs: \(Array(nodesById.keys))")
+        }
+        processNode(flow.entryNodeId)
+    }
+
+    /// Navigate to a specific node, optionally carrying the edge that was traversed.
+    func navigate(to targetNodeId: String, via edge: FlowEdge? = nil) {
+        lock.lock()
+
+        guard nodesById[targetNodeId] != nil else {
+            lock.unlock()
+            Logger.shared.error("Navigation target not found: \(targetNodeId)")
+            return
+        }
+
+        // Capture source screen before changing state
+        let sourceScreen: ScreenNode? = {
+            if case .screen(let screen) = nodesById[state.currentNodeId] {
+                return screen
+            }
+            return nil
+        }()
+
+        // Push current screen to history (also store the edge for back-navigation reversal)
+        if case .screen = nodesById[state.currentNodeId] {
+            state.history.append(NavigationHistoryEntry(
+                nodeId: state.currentNodeId,
+                forwardEdge: edge
+            ))
+        }
+
+        state.currentNodeId = targetNodeId
+        lock.unlock()
+
+        processNode(targetNodeId, sourceScreen: sourceScreen, traversedEdge: edge, isBack: false)
+    }
+
+    /// Go back in history
+    @discardableResult
+    func goBack() -> Bool {
+        lock.lock()
+
+        guard !state.history.isEmpty else {
+            lock.unlock()
+            // No history - close the flow
+            closeFlow(outcome: .dismissed)
+            return false
+        }
+
+        // Capture current screen as source for the back transition
+        let sourceScreen: ScreenNode? = {
+            if case .screen(let screen) = nodesById[state.currentNodeId] {
+                return screen
+            }
+            return nil
+        }()
+
+        let entry = state.history.removeLast()
+        state.currentNodeId = entry.nodeId
+
+        // Get the screen node and update index
+        var destinationScreen: ScreenNode?
+        if let node = nodesById[entry.nodeId], case .screen(let screen) = node {
+            destinationScreen = screen
+            state.screenIndex = screenNodes.firstIndex(where: { $0.id == screen.id }) ?? max(0, state.screenIndex - 1)
+        }
+
+        let screenIndex = state.screenIndex
+        lock.unlock()
+
+        let transitionInfo = NavigationTransitionInfo(
+            isBack: true,
+            traversedEdge: entry.forwardEdge,
+            sourceScreen: sourceScreen,
+            destinationScreen: destinationScreen
+        )
+
+        Logger.shared.debug("Navigated back to: \(entry.nodeId)")
+
+        // Trigger screen displayed callback FIRST to update UI (including progress bar).
+        // This must happen before the Combine event so that FlowSession's currentScreen
+        // is already updated when handleNavigationEvent receives .navigatedBack — matching
+        // the order used by forward navigation in processScreenNode(). Firing the Combine
+        // event first caused a double screenTransitionState update which could interfere
+        // with SwiftUI transitions when replaceFlow fires mid-animation (live mirror).
+        if let screen = destinationScreen {
+            onScreenDisplayed?(screen, screenIndex, transitionInfo)
+        }
+
+        navigationSubject.send(.navigatedBack(nodeId: entry.nodeId, transitionInfo: transitionInfo))
+
+        return true
+    }
+
+    /// Close the flow
+    func closeFlow(outcome: FlowOutcome = .completed) {
+        Logger.shared.info("Flow closed with outcome: \(outcome)")
+        navigationSubject.send(.flowClosed(outcome: outcome))
+        onFlowClose?(outcome)
+    }
+
+    // MARK: - Progress Calculation
+
+    /// Calculate current progress (0-100)
+    func calculateProgress() -> Double {
+        lock.lock()
+        defer { lock.unlock() }
+
+        // Get eligible screens (those with includeInProgress != false)
+        let eligibleScreens = screenNodes.filter { screen in
+            screen.props?.includeInProgress != false
+        }
+
+        guard !eligibleScreens.isEmpty else { return 0 }
+
+        // Get current screen directly from state (don't call currentScreen which would deadlock)
+        let currentNodeId = state.currentNodeId
+        guard let node = nodesById[currentNodeId],
+              case .screen(let currentScreenNode) = node else {
+            return 0
+        }
+
+        guard let currentIndex = eligibleScreens.firstIndex(where: { $0.id == currentScreenNode.id }) else {
+            return 0
+        }
+
+        return Double(currentIndex + 1) / Double(eligibleScreens.count) * 100
+    }
+
+    // MARK: - Flow Replacement (Live Mirror)
+
+    /// Replaces the flow definition with a new one, rebuilding all internal caches.
+    /// Used by Live Mirror for hot-reloading flow JSON from the editor.
+    func replaceFlow(_ newFlow: FlowDefinition, preservingCurrentNodeId: String? = nil) {
+        lock.lock()
+
+        // Update flow definition
+        self.flow = newFlow
+
+        // Rebuild node lookup
+        var nodeDict: [String: FlowNode] = [:]
+        var screenList: [ScreenNode] = []
+        for node in newFlow.nodes {
+            nodeDict[node.id] = node
+            if case .screen(let screenNode) = node {
+                screenList.append(screenNode)
+            }
+        }
+        self.nodesById = nodeDict
+        self.screenNodes = screenList
+
+        // Rebuild edge lookup
+        var edgeDict: [String: [FlowEdge]] = [:]
+        for edge in newFlow.edges {
+            if edgeDict[edge.fromNodeId] == nil {
+                edgeDict[edge.fromNodeId] = []
+            }
+            edgeDict[edge.fromNodeId]?.append(edge)
+        }
+        self.edgesByFromNode = edgeDict
+
+        // Preserve current position if the node still exists in the new flow,
+        // otherwise reset to entry. This prevents unnecessary navigation events
+        // during live mirror hot-reload that would tear down the view tree.
+        if let currentId = preservingCurrentNodeId, nodeDict[currentId] != nil {
+            self.state.currentNodeId = currentId
+            // Keep existing history intact — don't reset
+        } else {
+            self.state = NavigationState(entryNodeId: newFlow.entryNodeId)
+        }
+
+        lock.unlock()
+    }
+
+    // MARK: - Node Processing
+
+    private func processNode(_ nodeId: String, sourceScreen: ScreenNode? = nil,
+                             traversedEdge: FlowEdge? = nil, isBack: Bool = false) {
+        guard let node = nodesById[nodeId] else {
+            Logger.shared.error("Node not found: \(nodeId)")
+            return
+        }
+
+        switch node {
+        case .screen(let screenNode):
+            processScreenNode(screenNode, sourceScreen: sourceScreen,
+                            traversedEdge: traversedEdge, isBack: isBack)
+
+        case .condition(let conditionNode):
+            processConditionNode(conditionNode)
+
+        case .assign(let assignNode):
+            processAssignNode(assignNode)
+
+        case .abTest(let abTestNode):
+            processABTestNode(abTestNode)
+        }
+    }
+
+    private func processScreenNode(_ node: ScreenNode, sourceScreen: ScreenNode? = nil,
+                                    traversedEdge: FlowEdge? = nil, isBack: Bool = false) {
+        lock.lock()
+        state.screenIndex = screenNodes.firstIndex(where: { $0.id == node.id }) ?? state.screenIndex
+        let screenIndex = state.screenIndex
+        lock.unlock()
+
+        let transitionInfo = NavigationTransitionInfo(
+            isBack: isBack,
+            traversedEdge: traversedEdge,
+            sourceScreen: sourceScreen,
+            destinationScreen: node
+        )
+
+        Logger.shared.debug("Screen displayed: \(node.name) (\(node.id))")
+
+        // Use direct callback (more reliable than Combine in some scenarios)
+        Logger.shared.debug("NavigationController - calling onScreenDisplayed callback")
+        onScreenDisplayed?(node, screenIndex, transitionInfo)
+
+        // Also send via Combine for any other subscribers
+        Logger.shared.debug("NavigationController - about to send screenDisplayed event via Combine")
+        let event = NavigationEvent.screenDisplayed(screen: node, index: screenIndex, transitionInfo: transitionInfo)
+        navigationSubject.send(event)
+        Logger.shared.debug("NavigationController - screenDisplayed event sent")
+    }
+
+    private func processConditionNode(_ node: ConditionNode) {
+        let result = ConditionEvaluator.evaluate(node.condition, store: variableStore)
+        Logger.shared.debug("Condition \(node.id) evaluated to: \(result)")
+
+        let edgeKind: EdgeKind = result ? .conditionTrue : .conditionFalse
+        if let edge = findEdge(from: node.id, kind: edgeKind) {
+            navigate(to: edge.toNodeId)
+        } else {
+            Logger.shared.error("No edge found for condition \(node.id) with result \(result)")
+        }
+    }
+
+    private func processAssignNode(_ node: AssignNode) {
+        for assignment in node.assignments {
+            VariableOperationExecutor.apply(
+                operation: assignment.expression.operation,
+                key: assignment.variableKey,
+                operand: assignment.expression.value,
+                store: variableStore
+            )
+        }
+
+        Logger.shared.debug("Assignments processed for node \(node.id)")
+
+        // Continue to next node
+        if let edge = findEdge(from: node.id, kind: .normal) ?? findEdge(from: node.id) {
+            navigate(to: edge.toNodeId)
+        }
+    }
+
+    private func processABTestNode(_ node: ABTestNode) {
+        lock.lock()
+
+        // Check for existing assignment
+        var variantId = state.experimentAssignments[node.experimentKey]
+
+        if variantId == nil {
+            // Select a new variant
+            variantId = selectVariant(node.variants)
+            state.experimentAssignments[node.experimentKey] = variantId
+        }
+
+        lock.unlock()
+
+        Logger.shared.debug("AB Test \(node.experimentKey) assigned variant: \(variantId ?? "none")")
+
+        // Navigate to variant's target
+        if let variant = node.variants.first(where: { $0.id == variantId }) {
+            navigationSubject.send(.experimentAssigned(
+                experimentKey: node.experimentKey,
+                variantId: variant.id,
+                variantLabel: variant.label
+            ))
+            navigate(to: variant.targetNodeId)
+        } else {
+            Logger.shared.error("Variant not found: \(variantId ?? "nil")")
+        }
+    }
+
+    private func selectVariant(_ variants: [ABTestVariant]) -> String {
+        let totalWeight = variants.reduce(0.0) { $0 + $1.weight }
+        var random = Double.random(in: 0..<totalWeight)
+
+        for variant in variants {
+            random -= variant.weight
+            if random <= 0 {
+                return variant.id
+            }
+        }
+
+        return variants.last?.id ?? ""
+    }
+
+    // MARK: - Edge Finding
+
+    private func findEdge(from nodeId: String, kind: EdgeKind? = nil) -> FlowEdge? {
+        guard let edges = edgesByFromNode[nodeId] else { return nil }
+
+        if let kind = kind {
+            // Sort by priority and find matching kind
+            return edges
+                .filter { $0.kind == kind }
+                .sorted { ($0.priority ?? 0) < ($1.priority ?? 0) }
+                .first
+        } else {
+            // Return first edge (sorted by priority)
+            return edges
+                .sorted { ($0.priority ?? 0) < ($1.priority ?? 0) }
+                .first
+        }
+    }
+
+    /// Follow the default edge from a node (used for navigation actions)
+    func followDefaultEdge(from nodeId: String) {
+        if let edge = findEdge(from: nodeId) {
+            navigate(to: edge.toNodeId, via: edge)
+        } else {
+            // No outgoing edge means we've reached the end of the flow.
+            // Matches Expo SDK behavior so `goNext` on the last screen
+            // completes the flow instead of being a silent no-op.
+            Logger.shared.debug("No outgoing edge from \(nodeId), closing flow as completed")
+            closeFlow(outcome: .completed)
+        }
+    }
+
+    /// Find a specific edge from one node to another.
+    func findEdge(from sourceId: String, to targetId: String) -> FlowEdge? {
+        edgesByFromNode[sourceId]?.first(where: { $0.toNodeId == targetId })
+    }
+}
+
+// MARK: - Navigation Events
+
+enum NavigationEvent: Sendable {
+    case screenDisplayed(screen: ScreenNode, index: Int, transitionInfo: NavigationTransitionInfo)
+    case navigatedBack(nodeId: String, transitionInfo: NavigationTransitionInfo)
+    case experimentAssigned(experimentKey: String, variantId: String, variantLabel: String?)
+    case flowClosed(outcome: FlowOutcome)
+}
