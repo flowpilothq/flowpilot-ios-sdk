@@ -641,6 +641,7 @@ public struct FlowPresenterModifier: ViewModifier {
             }
     }
 
+    @MainActor
     private func checkAndPresent() {
         Logger.shared.debug("FlowPresenterModifier.checkAndPresent - session: \(session != nil ? "SET" : "nil")")
         if let session = session {
