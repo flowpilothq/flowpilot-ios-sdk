@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & verify
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme FlowPilotSDK \
+            -destination 'generic/platform=iOS Simulator'
