@@ -1423,6 +1423,7 @@ struct StackView: View {
 /// When `enabled` is `false` (no absolute children), this modifier is a no-op — no
 /// GeometryReader or ZStack is introduced, preserving exact existing rendering behavior.
 extension View {
+    @MainActor
     @ViewBuilder
     func overlayAbsoluteChildren(
         _ absoluteChildren: [ComponentNode],
