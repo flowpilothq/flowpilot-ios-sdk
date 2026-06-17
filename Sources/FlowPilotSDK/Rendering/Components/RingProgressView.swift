@@ -11,6 +11,7 @@ import SwiftUI
 /// it eases through staged targets, pausing at each, with a live percent in the
 /// center and a per-stage caption below — the "Analyzing… / Finalizing…"
 /// onboarding loader (`AutoProgressRing`). Mirrors the dashboard canvas + Expo.
+@MainActor
 struct RingProgressView: View {
     let node: ComponentNode
     let variableStore: VariableStore

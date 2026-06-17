@@ -27,9 +27,19 @@ actor ResolveCoalescer {
         if let existing = inFlight[key] {
             return existing
         }
+        // Clear the in-flight slot whether the operation succeeds or throws.
+        // Done inline (not in a `defer { Task { ... } }`) so we never capture
+        // `self` inside a nested concurrent closure — which Swift 5.10 rejects
+        // as "reference to captured var 'self' in concurrently-executing code".
         let task = Task { [weak self] () throws -> ResolvedFlow in
-            defer { Task { await self?.clear(key: key) } }
-            return try await operation()
+            do {
+                let flow = try await operation()
+                await self?.clear(key: key)
+                return flow
+            } catch {
+                await self?.clear(key: key)
+                throw error
+            }
         }
         inFlight[key] = task
         return task

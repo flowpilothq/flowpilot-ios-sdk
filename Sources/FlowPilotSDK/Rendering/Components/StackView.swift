@@ -208,6 +208,7 @@ struct JustifiedHStack: Layout {
 // MARK: - Stack View
 
 /// Renders a stack component (vertical, horizontal, or layered)
+@MainActor
 struct StackView: View {
     let node: ComponentNode
     let variableStore: VariableStore
