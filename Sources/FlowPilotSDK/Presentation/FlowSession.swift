@@ -51,6 +51,16 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
     // Timing
     private let startTime = Date()
 
+    // Progress persistence ("save user progress")
+    private let enableProgressPersistence: Bool
+    private let progressUserId: String
+
+    /// Whether this session should persist/restore progress: opt-in per flow via
+    /// `settings.saveProgress`, and never for preview/mirror sessions.
+    private var shouldPersistProgress: Bool {
+        enableProgressPersistence && flow.definition.settings?.saveProgress == true
+    }
+
     // Cancellables
     private var cancellables = Set<AnyCancellable>()
 
@@ -69,10 +79,13 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
         eventService: EventService?,
         analyticsCallback: AnalyticsCallback?,
         preloadMedia: Bool = true,
-        deliverySource: FlowDeliverySource = .network
+        deliverySource: FlowDeliverySource = .network,
+        enableProgressPersistence: Bool = true
     ) {
         self.flow = flow
         self.placementId = placementId
+        self.enableProgressPersistence = enableProgressPersistence
+        self.progressUserId = SessionManager.shared.userId
 
         // Initialize variable store
         self.variableStore = VariableStore()
@@ -167,7 +180,10 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
             sdkContext: sdkContext,
             eventService: nil,
             analyticsCallback: suppressAnalytics ? nil : nil,
-            preloadMedia: true
+            preloadMedia: true,
+            // Preview/mirror sessions hot-swap flows constantly and must never
+            // read or write persisted progress.
+            enableProgressPersistence: false
         )
     }
 
@@ -414,10 +430,58 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
             )
         }
 
-        // Start navigation
-        Logger.shared.debug("FlowSession.startNavigation() calling navigationController.start()")
-        navigationController.start()
-        Logger.shared.debug("FlowSession.startNavigation() navigationController.start() returned")
+        // Start navigation — resuming from saved progress when enabled.
+        if shouldPersistProgress, restoreSavedProgress() {
+            Logger.shared.debug("FlowSession.startNavigation() resumed from saved progress")
+        } else {
+            Logger.shared.debug("FlowSession.startNavigation() calling navigationController.start()")
+            navigationController.start()
+            Logger.shared.debug("FlowSession.startNavigation() navigationController.start() returned")
+        }
+    }
+
+    // MARK: - Progress Persistence
+
+    /// Attempt to resume this flow from a previously saved snapshot. Returns
+    /// `true` only when a valid snapshot for the current flow version was applied
+    /// and its screen displayed; otherwise the caller starts the flow normally.
+    private func restoreSavedProgress() -> Bool {
+        guard let snapshot = FlowProgressStore.shared.load(flowId: flow.flowId, userId: progressUserId) else {
+            return false
+        }
+
+        // The flow may have been republished since the snapshot was written; the
+        // graph could differ, so only resume an exact version match.
+        guard snapshot.flowVersionId == flow.flowVersionId else {
+            Logger.shared.debug("Discarding saved progress: version \(snapshot.flowVersionId) != \(flow.flowVersionId)")
+            FlowProgressStore.shared.clear(flowId: flow.flowId, userId: progressUserId)
+            return false
+        }
+
+        // Restore answers/variables first so any re-evaluated conditions or
+        // assignments downstream see the user's prior state.
+        variableStore.restoreValues(snapshot.variables)
+
+        guard navigationController.restore(from: snapshot.navigation) else {
+            FlowProgressStore.shared.clear(flowId: flow.flowId, userId: progressUserId)
+            return false
+        }
+        return true
+    }
+
+    /// Persist the current screen + variables so the flow can resume later.
+    /// No-op unless `settings.saveProgress` is on and a screen is showing.
+    private func persistProgress() {
+        guard shouldPersistProgress, currentScreen != nil else { return }
+        let snapshot = FlowProgressSnapshot(
+            flowId: flow.flowId,
+            flowVersionId: flow.flowVersionId,
+            userId: progressUserId,
+            navigation: navigationController.snapshotProgress(),
+            variables: variableStore.getAll(),
+            savedAt: Date()
+        )
+        FlowProgressStore.shared.save(snapshot)
     }
 
     /// Wait for the flow to complete and return the result
@@ -495,6 +559,9 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
                 guard let self = self else { return }
                 Logger.shared.verbose("FlowSession - variable changed, triggering UI update (trigger: \(self.variableUpdateTrigger + 1))")
                 self.variableUpdateTrigger += 1
+                // Persist freshly-entered answers so an interruption before the
+                // user advances still resumes with their input intact.
+                self.persistProgress()
             }
             .store(in: &cancellables)
     }
@@ -518,6 +585,8 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
             // (e.g., progress bar in auto mode)
             self.variableUpdateTrigger += 1
             Logger.shared.debug("FlowSession - currentScreen set to: \(screen.name), trigger: \(self.variableUpdateTrigger)")
+            // Checkpoint progress on every screen arrival (forward and back).
+            self.persistProgress()
         }
 
         if Thread.isMainThread {
@@ -598,6 +667,12 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
         // Track completion/dismissal. trackFlowDismissed takes explicit
         // screen context (snapshotted above) because the tracker's
         // currentScreen* fields were nilled by trackScreenExited.
+        // Completing the flow clears saved progress so the next run starts fresh.
+        // A dismissal/error keeps the snapshot so the user resumes on reopen.
+        if shouldPersistProgress, outcome == .completed {
+            FlowProgressStore.shared.clear(flowId: flow.flowId, userId: progressUserId)
+        }
+
         switch outcome {
         case .completed:
             analyticsTracker?.trackFlowCompleted()

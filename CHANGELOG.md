@@ -3,6 +3,16 @@
 All notable changes to the FlowPilot iOS SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0]
+
+- Identity API: `FlowPilot.identify(_:)` ties events to a stable, app-provided user id (Keychain-persisted across launches), and `FlowPilot.reset()` clears it on logout.
+- Resume flows from saved user progress, so returning users continue where they left off.
+- Comparison chart: gridlines, start dots, and a hollow dot style.
+- Linear progress bar driven by an `autoProgress` timeline.
+- Button icon/label children, full-width zones, and component gradients.
+- Analytics events carry an `is_debug` flag so DEBUG-build traffic can be excluded from production counts.
+- Fixes: non-100% percentage width/height for images; scroll content pinned to the viewport width to stop over-wide child overflow.
+
 ## [1.0.0]
 
 Initial public release.

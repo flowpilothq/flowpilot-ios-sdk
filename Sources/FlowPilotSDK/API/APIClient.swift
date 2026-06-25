@@ -69,6 +69,54 @@ final class APIClient: @unchecked Sendable {
         return try await executeWithRetry(request: request)
     }
 
+    /// Fire one request and ignore the response body.
+    ///
+    /// Unlike `request(...)`, this does **not** decode a JSON response — it is for
+    /// endpoints that reply with an empty body (e.g. `202 Accepted`). It also does
+    /// **not** retry: it's intended for fire-and-forget diagnostics where a retry
+    /// storm would be worse than a dropped request. It still throws on transport
+    /// failure / non-2xx so the caller can swallow it; callers are expected to
+    /// treat any throw as "dropped".
+    func send(
+        method: HTTPMethod,
+        path: String,
+        body: Encodable? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws {
+        guard let url = URL(string: "\(baseURL)\(path)") else {
+            throw FlowPilotError(
+                code: .internalError,
+                message: "Invalid request URL constructed from baseURL '\(baseURL)' and path '\(path)'"
+            )
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("FlowPilotSDK/\(FlowPilotSDK.version) iOS", forHTTPHeaderField: "User-Agent")
+
+        if let timeout = timeout {
+            request.timeoutInterval = timeout
+        }
+
+        if let body = body {
+            let encoder = JSONEncoder()
+            encoder.keyEncodingStrategy = .convertToSnakeCase
+            encoder.dateEncodingStrategy = .iso8601
+            request.httpBody = try encoder.encode(body)
+        }
+
+        Logger.shared.debug("API Send (no-body): \(method.rawValue) \(path)")
+
+        let (_, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw FlowPilotError.networkError(NSError(domain: "FlowPilot", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response"]))
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw FlowPilotError.apiError(statusCode: httpResponse.statusCode, message: "Unexpected status for \(path)")
+        }
+    }
+
     // MARK: - Retry Logic
 
     private func executeWithRetry<T: Decodable>(request: URLRequest, attempt: Int = 0) async throws -> T {

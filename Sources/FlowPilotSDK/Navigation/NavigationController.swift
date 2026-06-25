@@ -41,6 +41,24 @@ struct NavigationState: Sendable {
     }
 }
 
+// MARK: - Navigation Progress Snapshot
+
+/// A Codable snapshot of navigation state, persisted for "save user progress"
+/// so a flow can resume on the screen the user last reached. Captured/restored
+/// by `NavigationController.snapshotProgress()` / `restore(from:)` and stored by
+/// `FlowProgressStore`.
+struct NavigationProgressSnapshot: Codable, Sendable {
+    let currentNodeId: String
+    let history: [HistoryEntry]
+    let experimentAssignments: [String: String]
+    let screenIndex: Int
+
+    struct HistoryEntry: Codable, Sendable {
+        let nodeId: String
+        let forwardEdge: FlowEdge?
+    }
+}
+
 // MARK: - Navigation Controller
 
 /// Controls navigation through the flow graph
@@ -326,6 +344,58 @@ final class NavigationController: @unchecked Sendable {
         }
 
         lock.unlock()
+    }
+
+    // MARK: - Progress Persistence
+
+    /// Capture the current navigation state for "save user progress".
+    func snapshotProgress() -> NavigationProgressSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let history = state.history.map {
+            NavigationProgressSnapshot.HistoryEntry(nodeId: $0.nodeId, forwardEdge: $0.forwardEdge)
+        }
+        return NavigationProgressSnapshot(
+            currentNodeId: state.currentNodeId,
+            history: history,
+            experimentAssignments: state.experimentAssignments,
+            screenIndex: state.screenIndex
+        )
+    }
+
+    /// Restore navigation to a previously persisted state and display the saved
+    /// screen. Returns `false` (leaving state untouched) when the snapshot can't
+    /// be safely applied to the current graph — e.g. the saved screen no longer
+    /// exists — so the caller can fall back to `start()`.
+    @discardableResult
+    func restore(from snapshot: NavigationProgressSnapshot) -> Bool {
+        lock.lock()
+
+        // The saved position must still be a real screen in this graph.
+        guard let node = nodesById[snapshot.currentNodeId],
+              case .screen(let screen) = node else {
+            lock.unlock()
+            Logger.shared.warn("Cannot restore progress: node '\(snapshot.currentNodeId)' missing or not a screen")
+            return false
+        }
+
+        // Drop any history entries whose nodes no longer exist so goBack stays valid.
+        let restoredHistory = snapshot.history
+            .filter { nodesById[$0.nodeId] != nil }
+            .map { NavigationHistoryEntry(nodeId: $0.nodeId, forwardEdge: $0.forwardEdge) }
+
+        state.currentNodeId = snapshot.currentNodeId
+        state.history = restoredHistory
+        state.experimentAssignments = snapshot.experimentAssignments
+        state.screenIndex = screenNodes.firstIndex(where: { $0.id == screen.id }) ?? 0
+        lock.unlock()
+
+        Logger.shared.info("Restored flow progress at screen '\(screen.id)' with \(restoredHistory.count) history entries")
+
+        // Display the restored screen (no transition) the same way forward
+        // navigation does, so the presenter renders it immediately.
+        processScreenNode(screen, sourceScreen: nil, traversedEdge: nil, isBack: false)
+        return true
     }
 
     // MARK: - Node Processing

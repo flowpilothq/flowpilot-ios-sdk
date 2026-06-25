@@ -28,7 +28,7 @@ public enum FlowPilotExporter {
     // MARK: Config / Result
 
     public struct Config: Sendable {
-        /// API base URL including version, e.g. `https://api.flowpilot.io/v1`.
+        /// API base URL including version, e.g. `https://api.getflowpilot.io/v1`.
         public var baseURL: String
         /// Workspace API key (`fp_…`).
         public var apiKey: String

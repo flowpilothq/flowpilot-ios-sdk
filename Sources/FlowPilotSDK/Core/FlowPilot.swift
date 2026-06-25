@@ -69,6 +69,10 @@ public final class FlowPilot: @unchecked Sendable {
     private let flowCache: FlowCache
     private let bundledFlowProvider: BundledFlowProvider
 
+    /// Bounded, fire-and-forget reporter for the SDK's own internal failures.
+    /// A no-op when `configuration.disableErrorReporting` is set.
+    private let errorReporter: ErrorReporter
+
     /// Dedupes concurrent network resolves for the same cache key so a prefetch
     /// and a present-time resolve (or two presents) share one round-trip.
     private let resolveCoalescer = ResolveCoalescer()
@@ -126,6 +130,17 @@ public final class FlowPilot: @unchecked Sendable {
         // Initialize services
         self.resolveService = resolveService ?? ResolveService(apiClient: apiClient, appId: configuration.appId)
         self.eventService = EventService(apiClient: apiClient, appId: configuration.appId)
+
+        // Initialize internal error reporter (no-op when opted out). Reuses the
+        // same base URL + API key as every other request; posts to the backend's
+        // `/apps/{appId}/sdk-errors` endpoint, fire-and-forget and bounded.
+        self.errorReporter = ErrorReporter(
+            enabled: !configuration.disableErrorReporting,
+            baseURL: configuration.environment.baseURL,
+            apiKey: configuration.apiKey,
+            appId: configuration.appId,
+            environmentName: configuration.environment.name
+        )
 
         // Initialize cache
         self.flowCache = FlowCache(
@@ -208,6 +223,43 @@ public final class FlowPilot: @unchecked Sendable {
     /// Set the error callback
     public func setErrorCallback(_ callback: @escaping ErrorCallback) {
         errorCallback = callback
+    }
+
+    /// Central sink for the SDK's OWN internal failures.
+    ///
+    /// Does two things, both best-effort and non-throwing:
+    /// 1. Hands the error to the bounded, fire-and-forget `ErrorReporter` (which
+    ///    is a no-op when the customer opted out via `disableErrorReporting`).
+    /// 2. Surfaces the coerced `FlowPilotError` to the host's `errorCallback`, if
+    ///    one is set, so the integrating app can observe failures too.
+    ///
+    /// This must never throw or block the failing code path; call it from a
+    /// `catch` and continue. It deliberately does NOT log via `Logger.error` to
+    /// avoid any feedback loop — call sites already log at the appropriate level.
+    ///
+    /// - Parameters:
+    ///   - error: The failure to report (a `FlowPilotError` is mapped to its
+    ///     `code` + `context`; any other `Error` is reported with its type name).
+    ///   - code: Optional explicit error code override (defaults to the
+    ///     `FlowPilotError`'s code when available).
+    ///   - placementKey: Optional placement context added as `placement_id`.
+    ///   - level: `"error"` (default) or `"warning"`.
+    func reportInternal(
+        _ error: Error,
+        code: String? = nil,
+        placementKey: String? = nil,
+        level: String = "error"
+    ) {
+        var extra: [String: String]? = nil
+        if let placementKey = placementKey {
+            extra = ["placement_id": placementKey]
+        }
+        errorReporter.report(error, code: code, level: level, extraContext: extra)
+
+        if let callback = errorCallback {
+            let fpError = error as? FlowPilotError ?? FlowPilotError.networkError(error)
+            callback(fpError)
+        }
     }
 
     /// Register the most-recently-started session. Internal — called by the
@@ -364,6 +416,10 @@ public final class FlowPilot: @unchecked Sendable {
             // Tier 4: host fallback. Present the app's own native onboarding.
             let fpError = error as? FlowPilotError ?? FlowPilotError.networkError(error)
             Logger.shared.warn("presentPlacement: no FlowPilot flow available (\(fpError)). Presenting host fallback.")
+            // Report the coerced error before falling back to the host's native
+            // onboarding. (Deduped against any report `resolveDelivery` already
+            // emitted for the same failure within the dedupe window.)
+            reportInternal(fpError, placementKey: placementKey)
             let fallbackVC = fallback()
             viewController.present(fallbackVC, animated: options?.animated ?? true)
             return FlowResult(outcome: .error, error: fpError)
@@ -441,8 +497,14 @@ public final class FlowPilot: @unchecked Sendable {
                 return (bundled, .bundledDefault)
             }
 
-            // Nothing presentable — propagate so the caller can run the host
-            // fallback (Tier 4) or complete gracefully (Tier 5).
+            // Nothing presentable across every tier — this is a genuine internal
+            // failure (live resolve failed AND no stale cache / bundled default).
+            // Report it once here (covers both resolve-network failures and a
+            // bubbled-up `.invalidFlowSchema` decode failure, with whatever
+            // status_code/component context the error already carries) before
+            // propagating so the caller can run the host fallback (Tier 4) or
+            // complete gracefully (Tier 5).
+            reportInternal(error, placementKey: placementKey)
             throw error
         }
     }
@@ -831,6 +893,34 @@ public final class FlowPilot: @unchecked Sendable {
             productId: productId,
             metadata: metadata
         )
+    }
+
+    // MARK: - Identity
+
+    /// Associate subsequent events with a stable, app-provided user id (e.g.
+    /// your account id), persisted in the Keychain across launches. Without
+    /// this, FlowPilot uses an anonymous per-install id — accurate for
+    /// "returning installs" but never tied to a real account. Safe to call any
+    /// time; a flow session already in progress keeps the id it started with.
+    ///
+    /// Mirrors the Expo SDK's `FlowPilot.identify(_:)`.
+    ///
+    /// ```swift
+    /// FlowPilot.identify(currentUser.id)
+    /// ```
+    public static func identify(_ userId: String) {
+        guard !userId.isEmpty else {
+            Logger.shared.warn("FlowPilot.identify: empty userId ignored")
+            return
+        }
+        SessionManager.shared.setUserId(userId)
+    }
+
+    /// Clear the current identity (e.g. on logout). A fresh anonymous id and a
+    /// new session are created for subsequent activity. Mirrors the Expo SDK's
+    /// `FlowPilot.reset()`.
+    public static func reset() {
+        SessionManager.shared.clearAll()
     }
 
     // MARK: - Cache Management

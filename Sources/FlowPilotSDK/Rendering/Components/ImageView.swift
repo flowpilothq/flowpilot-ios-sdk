@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Image View
 
@@ -10,6 +13,13 @@ struct ImageView: View {
 
     /// Use cached images (preloaded content will show instantly)
     private let imageCache = ImageCache.shared
+
+    /// Measured size of the nearest ancestor stack, injected via
+    /// `injectParentSize()`. Used to resolve non-100% percentage width/height
+    /// (e.g. `height: "58%"`) the same way `UniversalStyleModifier` does, so an
+    /// image honours percentage sizing like the editor canvas + Expo SDK.
+    /// Requires the image's parent to have a definite (non-auto) height.
+    @Environment(\.parentSize) private var parentSize
 
     /// Unique identifier for this image based on resolved URL
     private var imageIdentifier: String {
@@ -141,25 +151,55 @@ struct ImageView: View {
         return Color(hex: tintColorStr)
     }
 
+    /// Base size for resolving non-100% percentages. Prefers the measured
+    /// `parentSize` (so behaviour matches the editor/Expo "% of parent" when the
+    /// parent has a definite size, preserving parity). When a dimension hasn't
+    /// been measured (0 — e.g. the screen is in a ScrollView, which proposes
+    /// unbounded height so the parent never resolves), it falls back to the
+    /// device screen so a `%` image is sized sensibly instead of collapsing to 0
+    /// or inflating to its intrinsic size.
+    private var percentBaseSize: CGSize {
+        #if canImport(UIKit)
+        let screen = UIScreen.main.bounds.size
+        #else
+        let screen = CGSize.zero
+        #endif
+        return CGSize(
+            width: parentSize.width > 0 ? parentSize.width : screen.width,
+            height: parentSize.height > 0 ? parentSize.height : screen.height
+        )
+    }
+
     private var resolvedWidth: CGFloat? {
-        if let width = props?.width {
-            switch width {
-            case .fixed(let value): return CGFloat(value)
-            case .percent(100): return .infinity
-            default: return nil
-            }
+        guard let width = props?.width else { return nil }
+        switch width {
+        case .fixed(let value):
+            return CGFloat(value)
+        case .percent(100):
+            return .infinity
+        case .percent(let value):
+            let base = percentBaseSize.width
+            guard base > 0 else { return nil }
+            return base * CGFloat(value) / 100
+        case .auto:
+            return nil
         }
-        return nil
     }
 
     private var resolvedHeight: CGFloat? {
-        if let height = props?.height {
-            switch height {
-            case .fixed(let value): return CGFloat(value)
-            default: return nil
-            }
+        guard let height = props?.height else { return nil }
+        switch height {
+        case .fixed(let value):
+            return CGFloat(value)
+        case .percent(100):
+            return .infinity
+        case .percent(let value):
+            let base = percentBaseSize.height
+            guard base > 0 else { return nil }
+            return base * CGFloat(value) / 100
+        case .auto:
+            return nil
         }
-        return nil
     }
 }
 

@@ -12,11 +12,11 @@ public enum FlowPilotEnvironment: Sendable, Equatable {
     var baseURL: String {
         switch self {
         case .development:
-            return "https://dev-api.flowpilot.io/v1"
+            return "http://localhost:8080/v1"
         case .staging:
-            return "https://staging-api.flowpilot.io/v1"
+            return "https://api.getflowpilot.io/v1"
         case .production:
-            return "https://api.flowpilot.io/v1"
+            return "https://api.getflowpilot.io/v1"
         case .custom(let url):
             return url
         }
@@ -236,6 +236,19 @@ public struct FlowPilotConfiguration: Sendable {
     /// Log level
     public let logLevel: FlowPilotLogLevel
 
+    // MARK: Error Reporting
+
+    /// Opt out of the SDK's internal error reporting (default: `false`).
+    ///
+    /// When the SDK hits one of its OWN internal failures (a failed flow
+    /// resolve, an invalid flow schema, a coerced presentation fallback) it
+    /// posts a small, bounded, fire-and-forget diagnostic to FlowPilot so we can
+    /// fix it. It is **not** a crash reporter: it installs no signal/exception
+    /// handlers, never blocks or throws into your code, never retries, dedupes
+    /// identical reports, and caps the total per launch. Set this to `true` to
+    /// disable it entirely — the reporter then becomes a no-op.
+    public let disableErrorReporting: Bool
+
     // MARK: Initialization
 
     public init(
@@ -254,7 +267,8 @@ public struct FlowPilotConfiguration: Sendable {
         debugMode: Bool? = nil,
         logLevel: FlowPilotLogLevel = .error,
         prefetchOnLaunch: [String] = [],
-        prefetchMediaStrategy: PrefetchMediaStrategy = .firstScreen
+        prefetchMediaStrategy: PrefetchMediaStrategy = .firstScreen,
+        disableErrorReporting: Bool = false
     ) {
         self.apiKey = apiKey
         self.appId = appId
@@ -272,6 +286,7 @@ public struct FlowPilotConfiguration: Sendable {
         self.logLevel = logLevel
         self.prefetchOnLaunch = prefetchOnLaunch
         self.prefetchMediaStrategy = prefetchMediaStrategy
+        self.disableErrorReporting = disableErrorReporting
     }
 }
 

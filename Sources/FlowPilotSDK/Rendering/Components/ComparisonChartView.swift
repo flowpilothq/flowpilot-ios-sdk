@@ -36,7 +36,9 @@ struct ComparisonChartView: View {
                 points: points,
                 dashed: (d["style"] as? String) == "dashed",
                 showArea: d["showArea"] as? Bool ?? false,
+                showStartDot: d["showStartDot"] as? Bool ?? false,
                 showEndDot: d["showEndDot"] as? Bool ?? false,
+                hollowDots: (d["dotStyle"] as? String) == "hollow",
                 animate: d["animate"] as? Bool ?? true
             )
         }
@@ -54,6 +56,11 @@ struct ComparisonChartView: View {
     private var xLabelEnd: String { (props?.getRaw("xLabels") as? [String: Any])?["end"] as? String ?? "" }
     private var yLabel: String { props?.getRaw("yLabel") as? String ?? "" }
     private var showLegend: Bool { props?.getRaw("legend") as? Bool ?? false }
+    /// Number of evenly-spaced horizontal dotted reference lines (0 = none).
+    private var gridLines: Int {
+        guard let n = Self.asDouble(props?.getRaw("gridLines")) else { return 0 }
+        return Swift.max(0, Int(n))
+    }
     private var animateOnAppear: Bool {
         PropertyResolver.resolve(props?.animateOnAppear, store: variableStore, default: true)
     }
@@ -88,6 +95,7 @@ struct ComparisonChartView: View {
                     size: geo.size,
                     series: series,
                     markers: markers,
+                    gridLines: gridLines,
                     xLabelStart: xLabelStart,
                     xLabelEnd: xLabelEnd,
                     yLabel: yLabel,
@@ -129,7 +137,11 @@ struct ChartSeries {
     let points: [CGPoint]   // data space (x, y)
     let dashed: Bool
     let showArea: Bool
+    let showStartDot: Bool
     let showEndDot: Bool
+    /// "hollow" dots render as a white fill + 2pt colored ring (Cal-AI weight
+    /// curve); otherwise a solid disc in the series colour.
+    let hollowDots: Bool
     /// Per-series opt-out of the on-appear animation (default true).
     let animate: Bool
 }
@@ -145,6 +157,7 @@ private struct ChartCanvas: View {
     let size: CGSize
     let series: [ChartSeries]
     let markers: [ChartMarker]
+    let gridLines: Int
     let xLabelStart: String
     let xLabelEnd: String
     let yLabel: String
@@ -189,6 +202,22 @@ private struct ChartCanvas: View {
         )
     }
 
+    /// A start/end marker: solid disc, or a white fill + colored ring when the
+    /// series uses `dotStyle: "hollow"`. Matches the web/Expo r=5 + 2px stroke.
+    @ViewBuilder
+    private func dotView(_ s: ChartSeries) -> some View {
+        if s.hollowDots {
+            Circle()
+                .fill(Color.white)
+                .frame(width: 10, height: 10)
+                .overlay(Circle().stroke(s.color, lineWidth: 2))
+        } else {
+            Circle()
+                .fill(s.color)
+                .frame(width: 10, height: 10)
+        }
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
             // Faint baseline
@@ -197,6 +226,17 @@ private struct ChartCanvas: View {
                 p.addLine(to: CGPoint(x: size.width - insetRight, y: baselineY))
             }
             .stroke(Color(red: 0.9, green: 0.91, blue: 0.92), lineWidth: 1)
+
+            // Horizontal dotted reference lines, evenly spaced between the top of
+            // the plot and the baseline (the Cal-AI weight-curve gridlines).
+            ForEach(Array(0..<Swift.max(0, gridLines)), id: \.self) { i in
+                let gy = insetTop + (CGFloat(i + 1) / CGFloat(gridLines + 1)) * (baselineY - insetTop)
+                Path { p in
+                    p.move(to: CGPoint(x: insetLeft, y: gy))
+                    p.addLine(to: CGPoint(x: size.width - insetRight, y: gy))
+                }
+                .stroke(Color(red: 0.82, green: 0.84, blue: 0.86), style: StrokeStyle(lineWidth: 1, dash: [2, 4]))
+            }
 
             // Markers
             ForEach(markers.indices, id: \.self) { i in
@@ -245,10 +285,14 @@ private struct ChartCanvas: View {
                         )
                     )
                     .animation(seriesAnim, value: progress)
+                if series[i].showStartDot, let first = pts.first {
+                    dotView(series[i])
+                        .position(x: first.x, y: first.y)
+                        .opacity(Double(p))
+                        .animation(seriesAnim, value: progress)
+                }
                 if series[i].showEndDot, let last = pts.last {
-                    Circle()
-                        .fill(series[i].color)
-                        .frame(width: 10, height: 10)
+                    dotView(series[i])
                         .position(x: last.x, y: last.y)
                         .opacity(Double(p))
                         .animation(seriesAnim, value: progress)

@@ -170,6 +170,31 @@ final class VariableStore: @unchecked Sendable {
         return true
     }
 
+    /// Restore previously persisted values (for "save user progress").
+    ///
+    /// Only writable, non-SDK-sourced variables are restored: SDK-sourced
+    /// variables must re-resolve from the *current* host context (a stale saved
+    /// value would be wrong), constants stay constant, and unknown keys from an
+    /// older flow version are ignored. Mirrors the guards `set(_:value:)` applies.
+    func restoreValues(_ saved: [String: VariableValue]) {
+        lock.lock()
+        var applied: [(String, VariableValue)] = []
+        for (key, value) in saved {
+            guard let definition = definitions[key], definition.writable else { continue }
+            if case .sdk = definition.source { continue }
+            values[key] = value
+            applied.append((key, value))
+        }
+        lock.unlock()
+
+        for (key, value) in applied {
+            changeSubject.send((key: key, value: value))
+        }
+        if !applied.isEmpty {
+            anyChangeSubject.send()
+        }
+    }
+
     /// Update context values (for SDK-sourced variables)
     func updateContext(_ context: SDKContext) {
         lock.lock()

@@ -753,6 +753,9 @@ enum TransitionEasing: String, Codable, Sendable {
 struct FlowSettings: Codable, Sendable {
     let defaultTransition: TransitionConfig?
     let backTransition: TransitionConfig?
+    /// When true, persist the user's in-progress run of this flow on device and
+    /// resume from where they left off on a later launch. See `FlowProgressStore`.
+    let saveProgress: Bool?
 }
 
 struct TransitionConfig: Codable, Sendable {

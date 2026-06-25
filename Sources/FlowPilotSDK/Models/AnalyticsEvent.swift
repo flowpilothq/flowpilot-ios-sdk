@@ -39,6 +39,11 @@ public struct AnalyticsEvent: Codable, Sendable {
     /// SDK version
     public let sdkVersion: String
 
+    /// True when emitted from a DEBUG build (Xcode run / simulator). The
+    /// dashboard excludes debug traffic from production analytics so testing
+    /// never inflates real user / impression counts.
+    public let isDebug: Bool
+
     // MARK: Optional Fields
 
     /// Flow version number
@@ -106,6 +111,7 @@ public struct AnalyticsEvent: Codable, Sendable {
         case sessionId = "session_id"
         case devicePlatform = "device_platform"
         case sdkVersion = "sdk_version"
+        case isDebug = "is_debug"
         case flowVersion = "flow_version"
         case experimentId = "experiment_id"
         case variantId = "variant_id"
@@ -165,6 +171,11 @@ public struct AnalyticsEvent: Codable, Sendable {
         self.sessionId = sessionId
         self.devicePlatform = "ios"
         self.sdkVersion = FlowPilotSDK.version
+        #if DEBUG
+        self.isDebug = true
+        #else
+        self.isDebug = false
+        #endif
         self.flowVersion = flowVersion
         self.experimentId = experimentId
         self.variantId = variantId
@@ -353,5 +364,5 @@ final class AnalyticsEventBuilder: @unchecked Sendable {
 // MARK: - SDK Version
 
 public enum FlowPilotSDK {
-    public static let version = "1.0.0"
+    public static let version = "1.1.0"
 }

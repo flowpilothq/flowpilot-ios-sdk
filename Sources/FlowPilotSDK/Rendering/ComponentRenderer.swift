@@ -131,7 +131,7 @@ struct ComponentRenderer: View {
             ToggleView(node: node, variableStore: variableStore, actionExecutor: actionExecutor, actionContext: actionContext)
 
         case .progress:
-            ProgressBarView(props: node.props, variableStore: variableStore, navigationController: actionContext.navigationController, renderTrigger: renderTrigger)
+            ProgressBarView(node: node, variableStore: variableStore, actionExecutor: actionExecutor, actionContext: actionContext, renderTrigger: renderTrigger)
 
         case .ringProgress:
             RingProgressView(

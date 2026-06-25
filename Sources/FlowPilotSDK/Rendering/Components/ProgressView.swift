@@ -2,26 +2,93 @@ import SwiftUI
 
 // MARK: - Progress Bar View
 
-/// Renders a progress bar component
+/// Renders a progress bar component.
+///
+/// When the node carries an `autoProgress` timeline (the SAME config the ring
+/// uses), the bar drives ITSELF: it eases through staged targets, pausing at
+/// each, with a live percent CENTERED OVER the bar and a per-stage caption below
+/// — the horizontal "analysis loader" (`AutoProgressBar`). Mirrors the dashboard
+/// canvas + Expo. See the `loader-bar` certified block.
 struct ProgressBarView: View {
-    let props: ComponentProps?
+    let node: ComponentNode
     let variableStore: VariableStore
-    let navigationController: NavigationController
+    let actionExecutor: ActionExecutor
+    let actionContext: ActionContext
     var renderTrigger: Int = 0
+
+    private var props: ComponentProps? { node.props }
+    private var navigationController: NavigationController { actionContext.navigationController }
 
     var body: some View {
         // Force re-evaluation when renderTrigger changes
         let _ = renderTrigger
-        AnimatedProgressTrack(
-            height: resolvedHeight,
-            trackColor: resolvedTrackColor,
-            fillColor: resolvedColor,
-            progress: resolvedProgress,
-            cornerRadius: resolvedCornerRadius,
-            animateProgress: resolvedAnimateProgress,
-            animationDuration: resolvedAnimationDuration,
-            animationCurve: resolvedAnimationCurve
-        )
+        if let auto = props?.ringAutoProgress {
+            AutoProgressBar(
+                config: auto,
+                height: resolvedHeight,
+                cornerRadius: resolvedCornerRadius,
+                color: resolvedColor,
+                trackColor: resolvedTrackColor,
+                percentFontSize: percentFontSize,
+                percentColor: percentColor,
+                percentWeight: percentWeight,
+                captionFontSize: captionFontSize,
+                captionColor: captionColor,
+                captionWeight: captionWeight,
+                captionSpacing: captionSpacing,
+                onComplete: fireOnComplete
+            )
+        } else {
+            AnimatedProgressTrack(
+                height: resolvedHeight,
+                trackColor: resolvedTrackColor,
+                fillColor: resolvedColor,
+                progress: resolvedProgress,
+                cornerRadius: resolvedCornerRadius,
+                animateProgress: resolvedAnimateProgress,
+                animationDuration: resolvedAnimationDuration,
+                animationCurve: resolvedAnimationCurve
+            )
+        }
+    }
+
+    // MARK: autoProgress label styling (shared raw keys with ringProgress)
+
+    private var percentFontSize: CGFloat {
+        CGFloat(PropertyResolver.resolve(props?.percentFontSize, store: variableStore, default: 16.0))
+    }
+    private var percentColor: Color {
+        Color(hex: PropertyResolver.resolve(props?.percentColor, store: variableStore, default: "#111827")) ?? .primary
+    }
+    private var percentWeight: Font.Weight {
+        progressFontWeight(from: PropertyResolver.resolve(props?.percentFontWeight, store: variableStore, default: "700"))
+    }
+    private var captionFontSize: CGFloat {
+        CGFloat(PropertyResolver.resolve(props?.captionFontSize, store: variableStore, default: 15.0))
+    }
+    private var captionColor: Color {
+        Color(hex: PropertyResolver.resolve(props?.captionColor, store: variableStore, default: "#111827")) ?? .primary
+    }
+    private var captionWeight: Font.Weight {
+        progressFontWeight(from: PropertyResolver.resolve(props?.captionFontWeight, store: variableStore, default: "600"))
+    }
+    private var captionSpacing: CGFloat {
+        CGFloat(PropertyResolver.resolve(props?.captionSpacing, store: variableStore, default: 16.0))
+    }
+
+    /// Fire the loader's `onComplete` actions (e.g. `goNext`) when the timeline
+    /// finishes — same path a button tap uses, on its own Task.
+    private func fireOnComplete() {
+        guard let actions = props?.ringAutoProgress?.onComplete, !actions.isEmpty else { return }
+        let scheduled = actions.map { ScheduledAction(action: $0) }
+        Task {
+            await actionExecutor.execute(
+                actions: scheduled,
+                context: actionContext,
+                elementId: node.id,
+                elementType: node.type.rawValue
+            )
+        }
     }
 
     private var resolvedProgress: Double {
@@ -147,6 +214,211 @@ private struct AnimatedProgressTrack: View {
         default:
             return .easeInOut(duration: duration)
         }
+    }
+}
+
+// MARK: - Auto Progress Bar (self-driving analysis loader, horizontal)
+
+/// The horizontal counterpart to `AutoProgressRing`: a self-driving linear loader
+/// that eases through staged targets over a timeline, pausing at each, with a
+/// live percent centered OVER the bar and a per-stage caption below. Reuses the
+/// shared `RingAutoProgress` config + schedule math (mirrors the dashboard + Expo).
+private struct AutoProgressBar: View {
+    let config: RingAutoProgress
+    let height: CGFloat
+    /// nil = capsule (pill), otherwise a rounded rectangle radius.
+    let cornerRadius: CGFloat?
+    let color: Color
+    let trackColor: Color
+    let percentFontSize: CGFloat
+    let percentColor: Color
+    let percentWeight: Font.Weight
+    let captionFontSize: CGFloat
+    let captionColor: Color
+    let captionWeight: Font.Weight
+    let captionSpacing: CGFloat
+    let onComplete: () -> Void
+
+    @State private var start = Date()
+    @State private var completeWork: DispatchWorkItem?
+    @State private var hapticWork: [DispatchWorkItem] = []
+
+    private var schedule: ProgressAutoSchedule { buildProgressAutoSchedule(config.stages) }
+    private var hasCaption: Bool { config.stages.contains { !($0.caption ?? "").isEmpty } }
+
+    /// A capsule is just a rounded rect with radius = height/2 — collapse both to
+    /// one `RoundedRectangle` (AnyShape is iOS 16+, the SDK targets iOS 15+).
+    private var effectiveCornerRadius: CGFloat {
+        if let radius = cornerRadius, radius > 0 { return radius }
+        return height / 2
+    }
+
+    var body: some View {
+        let schedule = self.schedule
+        let r = effectiveCornerRadius
+        // One TimelineView drives the fill, the centered percent, and the caption
+        // from a single sample so they never drift.
+        TimelineView(.animation) { ctx in
+            let elapsedMs = ctx.date.timeIntervalSince(start) * 1000
+            let sample = sampleProgressAuto(schedule, easing: config.easing, elapsedMs: elapsedMs, loop: config.loop)
+            VStack(spacing: 0) {
+                // Track + fill, clipped to the pill. The percent is an OVERLAY on
+                // top (NOT a ZStack child inside the GeometryReader, which would
+                // pin it top-leading and let the clip cut it off) so it is always
+                // centered over the full bar and never clipped. Mirrors the
+                // dashboard's absolutely-centered percent + Expo's centered Text.
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: r).fill(trackColor)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: r)
+                            .fill(color)
+                            .frame(width: max(0, geo.size.width * CGFloat(sample.value)))
+                    }
+                }
+                .frame(height: height)
+                .clipShape(RoundedRectangle(cornerRadius: r))
+                .overlay(percentLabel(sample))
+
+                if hasCaption {
+                    Text(sample.caption ?? "")
+                        .font(.system(size: captionFontSize, weight: captionWeight))
+                        .foregroundColor(captionColor)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.top, captionSpacing)
+                }
+            }
+        }
+        .onAppear {
+            start = Date()
+            scheduleComplete()
+            scheduleHaptics()
+        }
+        .onDisappear {
+            completeWork?.cancel()
+            hapticWork.forEach { $0.cancel() }
+        }
+    }
+
+    /// The live percent, centered over the bar (the overlay's default alignment).
+    @ViewBuilder
+    private func percentLabel(_ sample: (value: Double, caption: String?)) -> some View {
+        if config.showPercent {
+            Text("\(Int((sample.value * 100).rounded()))\(config.percentSuffix)")
+                .font(.system(size: percentFontSize, weight: percentWeight))
+                .foregroundColor(percentColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
+        }
+    }
+
+    private func scheduleComplete() {
+        completeWork?.cancel()
+        guard !config.loop, !config.onComplete.isEmpty else { return }
+        let totalSec = schedule.total / 1000.0
+        let work = DispatchWorkItem { onComplete() }
+        completeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, totalSec), execute: work)
+    }
+
+    /// Fire one haptic each time the bar reaches a stage's target (the start of
+    /// every hold segment). Tracked so navigating away cancels pending ticks.
+    private func scheduleHaptics() {
+        hapticWork.forEach { $0.cancel() }
+        hapticWork = []
+        guard config.haptic else { return }
+        let times = schedule.segments.filter { $0.hold }.map { $0.start }
+        var works: [DispatchWorkItem] = []
+        for ms in times {
+            let work = DispatchWorkItem { HapticManager.shared.fire(config.hapticIntensity) }
+            works.append(work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, ms / 1000.0), execute: work)
+        }
+        hapticWork = works
+    }
+}
+
+// MARK: - Auto Progress schedule math (mirrors dashboard + Expo + ring)
+
+private struct ProgressAutoSegment {
+    let start: Double
+    let end: Double
+    let from: Double
+    let to: Double
+    let caption: String?
+    let hold: Bool
+}
+
+private struct ProgressAutoSchedule {
+    let segments: [ProgressAutoSegment]
+    let total: Double
+    let finalValue: Double
+}
+
+private func buildProgressAutoSchedule(_ stages: [RingAutoProgressStage]) -> ProgressAutoSchedule {
+    var segments: [ProgressAutoSegment] = []
+    var t = 0.0
+    var prev = 0.0
+    for stage in stages {
+        let target = max(0, min(1, stage.target))
+        let ramp = max(0, stage.rampMs)
+        let hold = max(0, stage.holdMs)
+        if ramp > 0 {
+            segments.append(ProgressAutoSegment(start: t, end: t + ramp, from: prev, to: target, caption: stage.caption, hold: false))
+            t += ramp
+        }
+        segments.append(ProgressAutoSegment(start: t, end: t + hold, from: target, to: target, caption: stage.caption, hold: true))
+        t += hold
+        prev = target
+    }
+    return ProgressAutoSchedule(segments: segments, total: t, finalValue: prev)
+}
+
+private func progressEase(_ curve: String, _ t: Double) -> Double {
+    let x = max(0, min(1, t))
+    switch curve {
+    case "linear": return x
+    case "ease-in": return x * x
+    case "ease-out": return 1 - (1 - x) * (1 - x)
+    default: return x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2
+    }
+}
+
+private func sampleProgressAuto(
+    _ schedule: ProgressAutoSchedule,
+    easing: String,
+    elapsedMs: Double,
+    loop: Bool
+) -> (value: Double, caption: String?) {
+    guard let last = schedule.segments.last else { return (0, nil) }
+    var e = max(0, elapsedMs)
+    if loop && schedule.total > 0 {
+        e = e.truncatingRemainder(dividingBy: schedule.total)
+    }
+    if e >= schedule.total {
+        return (schedule.finalValue, last.caption)
+    }
+    for seg in schedule.segments {
+        if e < seg.end {
+            if seg.hold || seg.end == seg.start {
+                return (seg.to, seg.caption)
+            }
+            let local = (e - seg.start) / (seg.end - seg.start)
+            return (seg.from + (seg.to - seg.from) * progressEase(easing, local), seg.caption)
+        }
+    }
+    return (schedule.finalValue, last.caption)
+}
+
+private func progressFontWeight(from raw: String) -> Font.Weight {
+    switch raw {
+    case "100", "200", "300": return .light
+    case "400", "normal", "regular": return .regular
+    case "500": return .medium
+    case "600": return .semibold
+    case "700", "bold": return .bold
+    case "800", "900": return .heavy
+    default: return .regular
     }
 }
 
