@@ -260,6 +260,10 @@ struct StackView: View {
                     }
                     .overlayAbsoluteChildren(absoluteChildren, enabled: hasAbsoluteChildren, stackView: self)
                     .injectParentSize()
+                    // CSS flex-shrink for direct children: injected here (below this
+                    // stack's own UniversalStyleModifier, which reset the inherited
+                    // factor to 1.0) so it reaches the row's children but not deeper.
+                    .environment(\.horizontalShrinkScale, horizontalShrinkScale(spacing: CGFloat(spacing)))
                 }
 
             case "layered":
@@ -355,10 +359,24 @@ struct StackView: View {
 
         switch justifyMode {
         case .start:
-            HStack(alignment: vAlign, spacing: spacing) {
-                renderChildren(crossAxisAlignment: childAlignment)
+            if #available(iOS 16.0, macOS 13.0, *) {
+                // JustifiedHStack reports the *proposed* width (capped) rather than
+                // its content width, so an over-wide row of rigid children does NOT
+                // inflate its ancestors (a plain HStack reports content width, which
+                // `.frame(maxWidth:.infinity)` cannot shrink below — the overflow
+                // then drags every full-width sibling off the content box). With the
+                // container width no longer inflated, `horizontalShrinkScale` can
+                // resolve the true width and shrink the children to fit (flex-shrink).
+                JustifiedHStack(spacing: spacing, alignment: vAlign, justify: .start) {
+                    renderChildren(crossAxisAlignment: childAlignment)
+                }
+                .frame(maxWidth: resolvedMaxW, maxHeight: resolvedMaxH, alignment: Alignment(horizontal: .leading, vertical: vAlign))
+            } else {
+                HStack(alignment: vAlign, spacing: spacing) {
+                    renderChildren(crossAxisAlignment: childAlignment)
+                }
+                .frame(maxWidth: resolvedMaxW, maxHeight: resolvedMaxH, alignment: Alignment(horizontal: .leading, vertical: vAlign))
             }
-            .frame(maxWidth: resolvedMaxW, maxHeight: resolvedMaxH, alignment: Alignment(horizontal: .leading, vertical: vAlign))
 
         case .center:
             if #available(iOS 16.0, macOS 13.0, *) {
@@ -1158,6 +1176,92 @@ struct StackView: View {
             }
         }
         return nil
+    }
+
+    // MARK: - Flex-Shrink (CSS flex-shrink: 1)
+
+    /// CSS flex-shrink factor for this horizontal stack's **direct** children.
+    ///
+    /// SwiftUI `HStack` has no flex-shrink: fixed-width children stay rigid and
+    /// overflow, and an over-wide row then drags full-width siblings off the
+    /// content box. The editor (and Expo/Yoga) shrink children proportionally to
+    /// fit (default `flex-shrink: 1`). When every child has a resolvable width
+    /// (fixed or percent) and their natural widths + gaps exceed the stack's
+    /// available content width, this returns the factor (< 1.0) that shrinks them
+    /// to fit; the children's `UniversalStyleModifier` multiplies their width by it.
+    ///
+    /// Scoped narrow on purpose:
+    /// - if ANY child is auto/intrinsic (e.g. text) we bail to 1.0 — its natural
+    ///   width is unknown here and we must not mis-shrink ordinary rows;
+    /// - scrollable rows overflow at natural size (editor sets `flex-shrink: 0`),
+    ///   so they are excluded.
+    /// It therefore only fires for over-allocated rows of explicitly-sized boxes.
+    private func horizontalShrinkScale(spacing: CGFloat) -> CGFloat {
+        let children = flowChildren
+        guard !children.isEmpty else { return 1.0 }
+
+        // Scrollable rows are meant to overflow (flex-shrink:0), not shrink.
+        let scroll = PropertyResolver.resolve(node.props?.scrollBehavior, store: variableStore, default: "no-scroll")
+        if scroll == "scroll" { return 1.0 }
+
+        let available = ownContentWidthForChildren()
+        guard available > 0 else { return 1.0 }
+
+        var naturalSum: CGFloat = 0
+        for child in children {
+            guard let w = resolvableChildWidth(child, containerWidth: available), w > 0 else {
+                return 1.0  // unresolvable (auto/intrinsic) child → do not shrink
+            }
+            naturalSum += w
+        }
+        let gaps = CGFloat(max(0, children.count - 1)) * spacing
+        guard naturalSum + gaps > available else { return 1.0 }
+
+        // Shrink only the items; the gaps do not shrink (CSS).
+        let scale = (available - gaps) / naturalSum
+        let result = (scale > 0 && scale < 1) ? scale : 1.0
+        Logger.shared.debug("[Shrink] node=\(node.id) available=\(available) naturalSum=\(naturalSum) gaps=\(gaps) -> scale=\(result) (parentSize.w=\(parentSize.width))")
+        return result
+    }
+
+    /// Width available to this stack's children = its own resolved width minus
+    /// its own horizontal padding.
+    private func ownContentWidthForChildren() -> CGFloat {
+        let ownWidth: CGFloat
+        switch node.props?.width {
+        case .fixed(let v):
+            ownWidth = CGFloat(v)
+        case .percent(let v) where v != 100:
+            ownWidth = parentSize.width > 0 ? parentSize.width * CGFloat(v) / 100 : 0
+        default:
+            // 100% / auto / unset: block-level, fills the parent's content width.
+            ownWidth = parentSize.width
+        }
+        return ownWidth - ownHorizontalPadding()
+    }
+
+    /// This stack's own left+right padding (mirrors `UniversalStyleModifier`).
+    private func ownHorizontalPadding() -> CGFloat {
+        func d(_ p: PropertyValue<Double>?) -> CGFloat {
+            guard let p = p else { return 0 }
+            return CGFloat(PropertyResolver.resolve(p, store: variableStore, default: 0.0))
+        }
+        if node.props?.paddingAdvanced == true {
+            return d(node.props?.paddingLeft) + d(node.props?.paddingRight)
+        }
+        let h = d(node.props?.paddingHorizontal)
+        return h + h
+    }
+
+    /// A child's natural (pre-shrink) width, or `nil` when it can't be resolved
+    /// here (auto / intrinsic — e.g. text), signalling the caller not to shrink.
+    private func resolvableChildWidth(_ child: ComponentNode, containerWidth: CGFloat) -> CGFloat? {
+        switch child.props?.width {
+        case .fixed(let v): return CGFloat(v)
+        case .percent(let v) where v == 100: return containerWidth
+        case .percent(let v): return containerWidth * CGFloat(v) / 100
+        case .auto, .none: return nil
+        }
     }
 
     // MARK: - Absolute Positioning

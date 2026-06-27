@@ -364,5 +364,5 @@ final class AnalyticsEventBuilder: @unchecked Sendable {
 // MARK: - SDK Version
 
 public enum FlowPilotSDK {
-    public static let version = "1.1.0"
+    public static let version = "1.1.1"
 }

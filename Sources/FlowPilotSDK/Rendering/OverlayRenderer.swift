@@ -19,17 +19,42 @@ struct OverlayRenderer: View {
 
     var body: some View {
         if isVisible {
-            ComponentRenderer(
-                node: overlay.layout,
-                variableStore: variableStore,
-                actionExecutor: actionExecutor,
-                actionContext: actionContext,
-                mediaBaseUrl: nil,
-                iconBaseUrl: iconBaseUrl,
-                renderTrigger: renderTrigger
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: resolvedAlignment)
-            .allowsHitTesting(!(overlay.props?.passthrough ?? false))
+            badge
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: resolvedAlignment)
+                .allowsHitTesting(!(overlay.props?.passthrough ?? false))
+        }
+    }
+
+    /// The overlay's root component. An overlay is a floating, positioned layer,
+    /// so a `width: "auto"` root must **hug its content** (CSS shrink-to-fit for a
+    /// positioned box) rather than expand to the block-level default of 100%.
+    /// Without this, the auto-width badge fills the whole overlay frame and the
+    /// `resolvedAlignment` anchor (e.g. `topTrailing`) has nothing to push to one
+    /// side. `fixedSize(horizontal:)` makes it size to its content; an explicit
+    /// fixed/percent width is honored as-is.
+    @ViewBuilder
+    private var badge: some View {
+        let renderer = ComponentRenderer(
+            node: overlay.layout,
+            variableStore: variableStore,
+            actionExecutor: actionExecutor,
+            actionContext: actionContext,
+            mediaBaseUrl: nil,
+            iconBaseUrl: iconBaseUrl,
+            renderTrigger: renderTrigger
+        )
+        if rootHugsWidth {
+            renderer.fixedSize(horizontal: true, vertical: false)
+        } else {
+            renderer
+        }
+    }
+
+    /// Whether the overlay root should hug its content width (auto / unset width).
+    private var rootHugsWidth: Bool {
+        switch overlay.layout.props?.width {
+        case nil, .auto: return true
+        default: return false
         }
     }
 

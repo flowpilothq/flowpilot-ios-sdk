@@ -294,11 +294,27 @@ final class NavigationController: @unchecked Sendable {
             return 0
         }
 
-        guard let currentIndex = eligibleScreens.firstIndex(where: { $0.id == currentScreenNode.id }) else {
-            return 0
+        if let currentIndex = eligibleScreens.firstIndex(where: { $0.id == currentScreenNode.id }) {
+            return Double(currentIndex + 1) / Double(eligibleScreens.count) * 100
         }
 
-        return Double(currentIndex + 1) / Double(eligibleScreens.count) * 100
+        // Current screen is excluded from progress: HOLD at the last eligible
+        // screen before it (matches the editor's getProgressInfo). Returning 0
+        // here would make the bar collapse on every interstitial / excluded
+        // screen, diverging from the dashboard reference render.
+        guard let currentAllIndex = screenNodes.firstIndex(where: { $0.id == currentScreenNode.id }) else {
+            return 0
+        }
+        var lastProgressStep = 0
+        var i = currentAllIndex - 1
+        while i >= 0 {
+            if let priorIndex = eligibleScreens.firstIndex(where: { $0.id == screenNodes[i].id }) {
+                lastProgressStep = priorIndex + 1
+                break
+            }
+            i -= 1
+        }
+        return Double(lastProgressStep) / Double(eligibleScreens.count) * 100
     }
 
     // MARK: - Flow Replacement (Live Mirror)

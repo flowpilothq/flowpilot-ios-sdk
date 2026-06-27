@@ -3,6 +3,14 @@
 All notable changes to the FlowPilot iOS SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1]
+
+- Fix: percentage widths now resolve correctly when stacks are nested (a lone 33% child no longer renders full-width, and 50/50 rows are exact rather than incidental).
+- Fix: an overlay whose root width is `auto` hugs its content so positioned anchors (e.g. top-trailing) work as designed.
+- Fix: over-wide rows of rigid children shrink to fit instead of overflowing and dragging full-width siblings off the content box (matching the editor's default flex-shrink).
+- Fix: the progress bar holds at the last counted step on screens excluded from progress, instead of collapsing to zero.
+- Fix: press feedback no longer blocks scrolling. Pressing a card inside a list registers the tap and still lets the list scroll.
+
 ## [1.1.0]
 
 - Identity API: `FlowPilot.identify(_:)` ties events to a stable, app-provided user id (Keychain-persisted across launches), and `FlowPilot.reset()` clears it on logout.

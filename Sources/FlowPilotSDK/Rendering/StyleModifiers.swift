@@ -24,6 +24,24 @@ extension EnvironmentValues {
         get { self[ParentSizeKey.self] }
         set { self[ParentSizeKey.self] = newValue }
     }
+
+    /// The CSS flex-shrink factor applied to a **direct** child's resolved width.
+    ///
+    /// A horizontal stack whose children's natural widths overflow the available
+    /// space sets this (< 1.0) on its children to replicate CSS `flex-shrink: 1`:
+    /// the children shrink proportionally to fit instead of overflowing (SwiftUI
+    /// `HStack` has no flex-shrink — fixed-width children stay rigid). The default
+    /// `1.0` is a no-op, and `UniversalStyleModifier` resets it to `1.0` for the
+    /// subtree below each child so it never cascades past one level.
+    var horizontalShrinkScale: CGFloat {
+        get { self[HorizontalShrinkScaleKey.self] }
+        set { self[HorizontalShrinkScaleKey.self] = newValue }
+    }
+}
+
+/// Environment key carrying the CSS flex-shrink factor for a direct stack child.
+struct HorizontalShrinkScaleKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1.0
 }
 
 // MARK: - Parent Size Injector
@@ -35,11 +53,19 @@ extension EnvironmentValues {
 /// can resolve percentage-based dimensions relative to the container's actual size.
 ///
 /// Implementation note: A background `GeometryReader` captures the container's
-/// rendered size without altering its layout. The size is stored in `@State` and
+/// rendered size without altering its layout. The size is written straight into
+/// this modifier's own `@State` from the reader's `onAppear`/`onChange`, which
 /// triggers a second layout pass the first time it becomes available. This is the
 /// standard SwiftUI pattern for size-dependent layouts and produces no visible
 /// flicker because the initial render with `.zero` parent size causes percentage
 /// children to use intrinsic sizing, which is a reasonable default.
+///
+/// Why not a `PreferenceKey`: stacks nest, so a *shared* size preference key
+/// leaks every descendant injector's reading up into its ancestors'
+/// `onPreferenceChange` (last value wins in `reduce`). A nested injector then
+/// settles on a child's size — or never settles off `.zero` — so percentage
+/// children resolve against the wrong base (or `nil`). Writing each level's size
+/// directly into its own `@State` keeps every injector isolated.
 struct ParentSizeInjector: ViewModifier {
     @State private var measuredSize: CGSize = .zero
 
@@ -48,24 +74,21 @@ struct ParentSizeInjector: ViewModifier {
             .background(
                 GeometryReader { geometry in
                     Color.clear
-                        .preference(key: SizePreferenceKey.self, value: geometry.size)
+                        // Write *this* injector's own size into its own @State.
+                        // No shared PreferenceKey => no cross-talk between the
+                        // nested injectors that stacks-within-stacks create.
+                        .onAppear { updateSize(geometry.size) }
+                        .onChange(of: geometry.size) { newSize in updateSize(newSize) }
                 }
             )
-            .onPreferenceChange(SizePreferenceKey.self) { newSize in
-                // Only update when the size actually changes to avoid unnecessary re-renders
-                if measuredSize != newSize {
-                    measuredSize = newSize
-                }
-            }
             .environment(\.parentSize, measuredSize)
     }
-}
 
-/// Preference key for propagating measured sizes up the view hierarchy.
-private struct SizePreferenceKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-        value = nextValue()
+    private func updateSize(_ newSize: CGSize) {
+        // Only update when the size actually changes to avoid unnecessary re-renders.
+        if measuredSize != newSize {
+            measuredSize = newSize
+        }
     }
 }
 
@@ -136,6 +159,11 @@ struct UniversalStyleModifier: ViewModifier {
     /// dimensions (e.g., `width: "50%"` -> `parentSize.width * 0.5`).
     @Environment(\.parentSize) private var parentSize
 
+    /// CSS flex-shrink factor injected by an over-allocated horizontal stack onto
+    /// this (direct) child. Multiplies the resolved fixed/percent width so the
+    /// child shrinks to fit instead of overflowing. `1.0` (default) is a no-op.
+    @Environment(\.horizontalShrinkScale) private var horizontalShrinkScale
+
     func body(content: Content) -> some View {
         // Force re-evaluation when renderTrigger changes
         let _ = renderTrigger
@@ -160,6 +188,11 @@ struct UniversalStyleModifier: ViewModifier {
         // For fixed-width or auto-width components, the original order is correct
         // because the frame size is independent of available space.
         let isFullWidth = resolvedWidth == .infinity
+
+        // Reset the flex-shrink factor for this component's subtree. The scale an
+        // over-wide parent row injects (consumed above by `resolveWidth`) must
+        // affect ONLY this direct child's width, never cascade to grandchildren.
+        let content = content.environment(\.horizontalShrinkScale, 1.0)
 
         if isFullWidth && hasHorizontalMargin {
             // Full-width with horizontal margins:
@@ -275,7 +308,9 @@ struct UniversalStyleModifier: ViewModifier {
             // Ensure value is valid (non-negative and finite)
             let cgValue = CGFloat(value)
             guard cgValue >= 0, cgValue.isFinite else { return nil }
-            return cgValue
+            // Apply CSS flex-shrink (1.0 = no-op) so an over-wide horizontal row
+            // shrinks its fixed-width children to fit instead of overflowing.
+            return cgValue * horizontalShrinkScale
         case .percent(let value):
             if value == 100 {
                 return .infinity
@@ -283,7 +318,7 @@ struct UniversalStyleModifier: ViewModifier {
             // Non-100% percentage: compute from the parent container's measured width.
             // If parent size is not yet available (zero), fall back to nil (intrinsic sizing).
             guard parentSize.width > 0 else { return nil }
-            return parentSize.width * CGFloat(value) / 100
+            return parentSize.width * CGFloat(value) / 100 * horizontalShrinkScale
         }
     }
 
