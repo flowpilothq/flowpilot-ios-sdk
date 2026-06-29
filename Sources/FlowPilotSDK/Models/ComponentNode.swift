@@ -36,6 +36,8 @@ enum ComponentType: String, Codable, Sendable {
     case ringProgress
     case icon
     case slider
+    case picker
+    case ruler
     case lottie
     case comparisonChart
     case custom
@@ -631,6 +633,110 @@ struct ComponentProps: Codable, Sendable {
     var sliderThumbColor: PropertyValue<String>? { getPropertyValue("thumbColor") }
     var showValueLabel: PropertyValue<Bool>? { getPropertyValue("showValueLabel") }
     var valueFormat: PropertyValue<String>? { getPropertyValue("valueFormat") }
+
+    // Modern slider styling (additive; defaults preserve the legacy look).
+    /// Thickness of the track & fill in points (default 6).
+    var sliderTrackHeight: PropertyValue<Double>? { getPropertyValue("trackHeight") }
+    /// Trailing fill color; when present the fill is a leading→trailing gradient
+    /// from `fillColor` to this. Token-resolvable like the other colors.
+    var sliderFillColorEnd: PropertyValue<String>? { getPropertyValue("fillColorEnd") }
+    /// "circle" (default) or "pill".
+    var sliderThumbStyle: PropertyValue<String>? { getPropertyValue("thumbStyle") }
+    /// Circle: diameter (default 18). Pill: width (default 28).
+    var sliderThumbSize: PropertyValue<Double>? { getPropertyValue("thumbSize") }
+    /// "inline" (default) or "top".
+    var sliderValueLabelPosition: PropertyValue<String>? { getPropertyValue("valueLabelPosition") }
+    /// Readout font size (default 14 inline, 40 top).
+    var sliderValueLabelSize: PropertyValue<Double>? { getPropertyValue("valueLabelSize") }
+    /// Readout color (token-resolvable). Default: inline = secondary/gray;
+    /// top = the resolved `fillColor`.
+    var sliderValueLabelColor: PropertyValue<String>? { getPropertyValue("valueLabelColor") }
+
+    // MARK: Picker Properties
+
+    /// "wheel" (default) or "date". Reuses the shared `mode` accessor below where
+    /// possible, but exposed here for clarity at the picker call sites.
+    var pickerMode: PropertyValue<String>? { getPropertyValue("mode") }
+
+    /// Raw wheel-mode column specs. Each entry is an untyped dictionary
+    /// (header / variableKey / unit / defaultValue / width plus EXACTLY ONE
+    /// source: min/max/step OR options). Parsed by `PickerView`.
+    var pickerColumns: [[String: Any]]? {
+        guard let arr = rawProps["columns"]?.value as? [Any] else { return nil }
+        let dicts = arr.compactMap { $0 as? [String: Any] }
+        return dicts.isEmpty ? nil : dicts
+    }
+
+    /// Imperial/Metric unit-toggle config (wheel mode only). When present with
+    /// options it REPLACES top-level `columns`/`mode`. Untyped dictionary parsed
+    /// by `PickerView` (systemVariableKey / default / canonicalSystem / options).
+    var pickerUnitToggle: [String: Any]? {
+        rawProps["unitToggle"]?.value as? [String: Any]
+    }
+
+    // Date mode
+    var pickerMinDate: PropertyValue<String>? { getPropertyValue("minDate") }
+    var pickerMaxDate: PropertyValue<String>? { getPropertyValue("maxDate") }
+    var pickerDateOrder: PropertyValue<String>? { getPropertyValue("dateOrder") }
+    var pickerMonthFormat: PropertyValue<String>? { getPropertyValue("monthFormat") }
+    /// Date-mode initial ISO value (shares the raw key `"defaultValue"`); the
+    /// bound variable wins on appear.
+    var pickerDefaultDate: PropertyValue<String>? { getPropertyValue("defaultValue") }
+
+    // Appearance (both modes)
+    var pickerVisibleRows: PropertyValue<Double>? { getPropertyValue("visibleRows") }
+    var pickerItemHeight: PropertyValue<Double>? { getPropertyValue("itemHeight") }
+    var pickerSelectionStyle: PropertyValue<String>? { getPropertyValue("selectionStyle") }
+    var pickerSelectionColor: PropertyValue<String>? { getPropertyValue("selectionColor") }
+    var pickerTextColor: PropertyValue<String>? { getPropertyValue("textColor") }
+    var pickerSelectedTextColor: PropertyValue<String>? { getPropertyValue("selectedTextColor") }
+    var pickerHeaderColor: PropertyValue<String>? { getPropertyValue("headerColor") }
+    var pickerFontSize: PropertyValue<Double>? { getPropertyValue("fontSize") }
+    var pickerSelectedFontSize: PropertyValue<Double>? { getPropertyValue("selectedFontSize") }
+    var pickerHaptics: PropertyValue<Bool>? { getPropertyValue("haptics") }
+    /// Infinite wrap (raw key `"loop"`, shared with the lottie accessor).
+    var pickerLoop: PropertyValue<Bool>? { getPropertyValue("loop") }
+
+    // MARK: Ruler Properties
+
+    /// "horizontal" (default) or "vertical".
+    var rulerOrientation: PropertyValue<String>? { getPropertyValue("orientation") }
+
+    // Single continuous scale (used when no `unitToggle` is present; the toggle's
+    // active `track` supplies these instead). `min`/`max`/`step`/`value` share the
+    // raw keys with the slider's accessors but are exposed here for clarity at the
+    // ruler call sites. The bound variable wins over `value` on appear.
+    var rulerMin: PropertyValue<Double>? { getPropertyValue("min") }
+    var rulerMax: PropertyValue<Double>? { getPropertyValue("max") }
+    var rulerStep: PropertyValue<Double>? { getPropertyValue("step") }
+    var rulerValue: PropertyValue<Double>? { getPropertyValue("value") }
+    var rulerUnit: PropertyValue<String>? { getPropertyValue("unit") }
+
+    // Tick strip appearance.
+    var rulerMajorEvery: PropertyValue<Double>? { getPropertyValue("majorEvery") }
+    var rulerTickSpacing: PropertyValue<Double>? { getPropertyValue("tickSpacing") }
+    var rulerTickThickness: PropertyValue<Double>? { getPropertyValue("tickThickness") }
+    var rulerMinorTickLength: PropertyValue<Double>? { getPropertyValue("minorTickLength") }
+    var rulerMajorTickLength: PropertyValue<Double>? { getPropertyValue("majorTickLength") }
+    var rulerTickColor: PropertyValue<String>? { getPropertyValue("tickColor") }
+    var rulerMajorTickColor: PropertyValue<String>? { getPropertyValue("majorTickColor") }
+    var rulerIndicatorColor: PropertyValue<String>? { getPropertyValue("indicatorColor") }
+    var rulerIndicatorThickness: PropertyValue<Double>? { getPropertyValue("indicatorThickness") }
+
+    // Big value readout. (`showValueLabel` / `valueFormat` reuse the slider
+    // accessors above — same raw keys.)
+    var rulerValueTemplate: PropertyValue<String>? { getPropertyValue("valueTemplate") }
+    var rulerValueColor: PropertyValue<String>? { getPropertyValue("valueColor") }
+    var rulerValueFontSize: PropertyValue<Double>? { getPropertyValue("valueFontSize") }
+    var rulerValueFontWeight: PropertyValue<String>? { getPropertyValue("valueFontWeight") }
+
+    /// Optional Imperial/Metric unit-toggle config. When present with options it
+    /// REPLACES the top-level scale: each system carries exactly ONE `track`.
+    /// Untyped dictionary parsed by `RulerView` (systemVariableKey / default /
+    /// canonicalSystem / toggleStyle / options[{ key, label, track }]).
+    var rulerUnitToggle: [String: Any]? {
+        rawProps["unitToggle"]?.value as? [String: Any]
+    }
 
     // MARK: Lottie Properties
 

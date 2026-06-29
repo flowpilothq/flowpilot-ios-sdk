@@ -313,6 +313,19 @@ struct UniversalStyleModifier: ViewModifier {
             return cgValue * horizontalShrinkScale
         case .percent(let value):
             if value == 100 {
+                // CSS flex-shrink for a 100%-width child of an over-allocated
+                // horizontal row: the row injects a shrink factor (< 1.0) so two
+                // 100%-width siblings can share the row instead of each greedily
+                // filling it. A `.infinity` frame cannot be scaled, so when a
+                // shrink factor is present we must resolve 100% to a CONCRETE
+                // width (the parent's content width × factor) — otherwise the
+                // child overflows. Yoga/Expo treat `width: 100%` as flex-basis
+                // with flex-shrink: 1; this matches that. With no shrink (factor
+                // 1.0, the default) we keep block-level `.infinity` fill so a
+                // lone 100%-width child still expands normally.
+                if horizontalShrinkScale < 1.0, parentSize.width > 0 {
+                    return parentSize.width * horizontalShrinkScale
+                }
                 return .infinity
             }
             // Non-100% percentage: compute from the parent container's measured width.

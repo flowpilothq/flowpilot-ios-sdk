@@ -50,55 +50,156 @@ struct SliderView: View {
         return CGFloat((currentValue - minValue) / (maxValue - minValue))
     }
 
-    private let trackHeight: CGFloat = 6
-    private let thumbSize: CGFloat = 20
+    // MARK: - Modern styling (additive; defaults preserve the legacy look)
+
+    /// Thickness of the track & fill (default 6).
+    private var trackHeight: CGFloat {
+        CGFloat(PropertyResolver.resolve(props?.sliderTrackHeight, store: variableStore, default: 6.0))
+    }
+
+    /// Trailing fill color hex when a gradient is configured; nil ⇒ solid fill.
+    private var fillColorEndHex: String? {
+        guard let hex = PropertyResolver.resolve(props?.sliderFillColorEnd, store: variableStore),
+              !hex.isEmpty else { return nil }
+        return hex
+    }
+
+    /// Fill style: a leading→trailing gradient when `fillColorEnd` is set,
+    /// otherwise a solid `fillColor`.
+    private var fillStyle: AnyShapeStyle {
+        if let endHex = fillColorEndHex, let endColor = Color(hex: endHex) {
+            return AnyShapeStyle(
+                LinearGradient(colors: [fillColor, endColor], startPoint: .leading, endPoint: .trailing)
+            )
+        }
+        return AnyShapeStyle(fillColor)
+    }
+
+    /// "circle" (default) or "pill".
+    private var thumbStyle: String {
+        PropertyResolver.resolve(props?.sliderThumbStyle, store: variableStore, default: "circle")
+    }
+
+    /// Thumb width: circle diameter (default 18) or pill width (default 28).
+    private var thumbW: CGFloat {
+        let defaultW: Double = thumbStyle == "pill" ? 28 : 18
+        return CGFloat(PropertyResolver.resolve(props?.sliderThumbSize, store: variableStore, default: defaultW))
+    }
+
+    /// Pill thumb height (a vertical capsule), clamped to [36, 60].
+    private var pillHeight: CGFloat {
+        max(36, min(60, trackHeight + 30))
+    }
+
+    /// Thumb height: `pillHeight` for the pill style, otherwise `thumbW`.
+    private var thumbH: CGFloat {
+        thumbStyle == "pill" ? pillHeight : thumbW
+    }
+
+    /// Vertical extent of the interactive track row.
+    private var rowHeight: CGFloat {
+        max(trackHeight, thumbH)
+    }
+
+    /// "inline" (default) or "top".
+    private var valueLabelPosition: String {
+        PropertyResolver.resolve(props?.sliderValueLabelPosition, store: variableStore, default: "inline")
+    }
+
+    /// Readout font size (default 14 inline, 40 top).
+    private var valueLabelSize: CGFloat {
+        let def: Double = valueLabelPosition == "top" ? 40 : 14
+        return CGFloat(PropertyResolver.resolve(props?.sliderValueLabelSize, store: variableStore, default: def))
+    }
+
+    /// Readout color. Default: inline = secondary/gray; top = the resolved `fillColor`.
+    private var valueLabelColor: Color {
+        if let hex = PropertyResolver.resolve(props?.sliderValueLabelColor, store: variableStore),
+           !hex.isEmpty, let c = Color(hex: hex) {
+            return c
+        }
+        return valueLabelPosition == "top" ? fillColor : .secondary
+    }
+
+    // MARK: - Body
 
     var body: some View {
         let _ = renderTrigger
-        HStack(spacing: 12) {
-            GeometryReader { geo in
-                let width = geo.size.width
-                let clamped = max(0, min(1, fraction))
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(trackColor)
-                        .frame(height: trackHeight)
-                    Capsule()
-                        .fill(fillColor)
-                        .frame(width: width * clamped, height: trackHeight)
-                    Circle()
-                        .fill(thumbColor)
-                        .frame(width: thumbSize, height: thumbSize)
-                        .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 1)
-                        .offset(x: width * clamped - thumbSize / 2)
+        Group {
+            if showValueLabel && valueLabelPosition == "top" {
+                VStack(spacing: 12) {
+                    Text(formattedValue)
+                        .font(.system(size: valueLabelSize, weight: .heavy))
+                        .foregroundColor(valueLabelColor)
+                    trackRow
                 }
-                .frame(maxHeight: .infinity, alignment: .center)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            // Write the bound variable live during the drag so
-                            // anything else bound to it (e.g. a ring) reacts.
-                            updateValue(fromX: value.location.x, width: width)
-                        }
-                        .onEnded { _ in
-                            // Fire the onChange interaction once per gesture
-                            // (on release) rather than per micro-step.
-                            fireInteraction(event: .onChange)
-                        }
-                )
-            }
-            .frame(height: thumbSize)
-
-            if showValueLabel {
-                Text(formattedValue)
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+            } else {
+                HStack(spacing: 12) {
+                    trackRow
+                    if showValueLabel {
+                        Text(formattedValue)
+                            .font(.system(size: valueLabelSize, weight: .medium))
+                            .foregroundColor(valueLabelColor)
+                    }
+                }
+                .frame(maxWidth: .infinity)
             }
         }
-        .frame(maxWidth: .infinity)
         .onAppear { loadInitialValue() }
         .onChange(of: renderTrigger) { _ in syncFromVariable() }
+    }
+
+    /// The interactive track row: track + fill + thumb measured by a
+    /// `GeometryReader` so the drag maps the touch x across the FULL track
+    /// width. The hit area covers the full `rowHeight`.
+    private var trackRow: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            let clamped = max(0, min(1, fraction))
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(trackColor)
+                    .frame(height: trackHeight)
+                Capsule()
+                    .fill(fillStyle)
+                    .frame(width: width * clamped, height: trackHeight)
+                thumb
+                    .shadow(color: .black.opacity(0.25), radius: 3, x: 0, y: 1)
+                    .offset(x: width * clamped - thumbW / 2)
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        // Write the bound variable live during the drag so
+                        // anything else bound to it (e.g. a ring) reacts.
+                        updateValue(fromX: value.location.x, width: width)
+                    }
+                    .onEnded { _ in
+                        // Fire the onChange interaction once per gesture
+                        // (on release) rather than per micro-step.
+                        fireInteraction(event: .onChange)
+                    }
+            )
+        }
+        .frame(height: rowHeight)
+    }
+
+    /// The draggable thumb: a `Circle` (circle style) or a vertical capsule
+    /// `RoundedRectangle` (pill style), centered on the fill's trailing edge.
+    @ViewBuilder
+    private var thumb: some View {
+        if thumbStyle == "pill" {
+            RoundedRectangle(cornerRadius: thumbW / 2)
+                .fill(thumbColor)
+                .frame(width: thumbW, height: pillHeight)
+        } else {
+            Circle()
+                .fill(thumbColor)
+                .frame(width: thumbW, height: thumbW)
+        }
     }
 
     // MARK: - Value Mapping

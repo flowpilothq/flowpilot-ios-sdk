@@ -147,6 +147,12 @@ struct ComponentRenderer: View {
         case .slider:
             SliderView(node: node, variableStore: variableStore, actionExecutor: actionExecutor, actionContext: actionContext, renderTrigger: renderTrigger)
 
+        case .picker:
+            PickerView(node: node, variableStore: variableStore, actionExecutor: actionExecutor, actionContext: actionContext, renderTrigger: renderTrigger)
+
+        case .ruler:
+            RulerView(node: node, variableStore: variableStore, actionExecutor: actionExecutor, actionContext: actionContext, renderTrigger: renderTrigger)
+
         case .lottie:
             LottieView(props: node.props, variableStore: variableStore, mediaBaseUrl: mediaBaseUrl)
 

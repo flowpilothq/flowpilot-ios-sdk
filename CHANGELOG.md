@@ -3,6 +3,13 @@
 All notable changes to the FlowPilot iOS SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0]
+
+- Picker (wheel) component, with an optional Imperial/Metric unit-system toggle and a shared centered header across grouped picker columns.
+- Ruler component (horizontal scrubbing scale) that shares the same unit-system toggle.
+- Modern slider styling: configurable track thickness, a leading-to-trailing gradient fill, a pill thumb style with adjustable size, and a top value readout with its own size and color.
+- Fix: in an over-allocated horizontal row, two `width: 100%` siblings now shrink to share the row (CSS flex-shrink) instead of each filling it and overflowing; a lone 100%-width child still expands normally.
+
 ## [1.1.1]
 
 - Fix: percentage widths now resolve correctly when stacks are nested (a lone 33% child no longer renders full-width, and 50/50 rows are exact rather than incidental).
