@@ -3,6 +3,10 @@
 All notable changes to the FlowPilot iOS SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1]
+
+- Fix: an in-flow abTest node whose variants all have weight 0 (or an empty variant list) no longer crashes during variant selection; it falls back to a uniform pick over the available variants.
+
 ## [1.3.0]
 
 - In-flow A/B attribution: every analytics event now carries an `ab_assignments` map (abTest node id → chosen variant id) once any in-flow abTest node has bucketed, enabling per-variant funnels distinct from the server-side `experiment_id`/`variant_id` columns. The map is persisted with saved progress and reseeded on a resumed session.

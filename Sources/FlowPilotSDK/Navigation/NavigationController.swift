@@ -561,7 +561,15 @@ final class NavigationController: @unchecked Sendable {
     }
 
     private func selectVariant(_ variants: [ABTestVariant]) -> String {
+        guard !variants.isEmpty else { return "" }
+
         let totalWeight = variants.reduce(0.0) { $0 + $1.weight }
+        // Guard the RNG: `Double.random(in: 0..<0)` traps, so if a flow ships
+        // with all-zero weights, fall back to a uniform pick instead of crashing.
+        guard totalWeight > 0 else {
+            return variants[Int.random(in: 0..<variants.count)].id
+        }
+
         var random = Double.random(in: 0..<totalWeight)
 
         for variant in variants {
