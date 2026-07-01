@@ -30,13 +30,20 @@ struct NavigationHistoryEntry: Sendable {
 struct NavigationState: Sendable {
     var currentNodeId: String
     var history: [NavigationHistoryEntry]
+    /// In-flow A/B stickiness, keyed by `ABTestNode.experimentKey` → variant id.
     var experimentAssignments: [String: String]
+    /// In-flow A/B attribution, keyed by abTest `FlowNode.id` → chosen variant
+    /// id. Stamped onto analytics events (`ab_assignments`) so per-variant
+    /// funnels are possible; parallel to `experimentAssignments`, which is
+    /// keyed by experimentKey for stickiness.
+    var abAssignmentsByNode: [String: String]
     var screenIndex: Int
 
     init(entryNodeId: String) {
         self.currentNodeId = entryNodeId
         self.history = []
         self.experimentAssignments = [:]
+        self.abAssignmentsByNode = [:]
         self.screenIndex = 0
     }
 }
@@ -51,6 +58,10 @@ struct NavigationProgressSnapshot: Codable, Sendable {
     let currentNodeId: String
     let history: [HistoryEntry]
     let experimentAssignments: [String: String]
+    /// Persisted node→variant in-flow A/B attribution so `ab_assignments` keeps
+    /// riding events after a resumed session. Optional for backward-compatible
+    /// decoding of snapshots written before this field existed.
+    let abAssignments: [String: String]?
     let screenIndex: Int
 
     struct HistoryEntry: Codable, Sendable {
@@ -161,11 +172,19 @@ final class NavigationController: @unchecked Sendable {
         return state.history.map { $0.nodeId }
     }
 
-    /// Get experiment assignments
+    /// Get experiment assignments (keyed by experimentKey, for stickiness)
     var experimentAssignments: [String: String] {
         lock.lock()
         defer { lock.unlock() }
         return state.experimentAssignments
+    }
+
+    /// Get the cumulative in-flow A/B attribution map (abTest node id → variant
+    /// id) so the session/tracker can stamp it onto events as `ab_assignments`.
+    var abAssignmentsByNode: [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return state.abAssignmentsByNode
     }
 
     /// Start the flow (process entry node)
@@ -375,6 +394,7 @@ final class NavigationController: @unchecked Sendable {
             currentNodeId: state.currentNodeId,
             history: history,
             experimentAssignments: state.experimentAssignments,
+            abAssignments: state.abAssignmentsByNode,
             screenIndex: state.screenIndex
         )
     }
@@ -403,6 +423,7 @@ final class NavigationController: @unchecked Sendable {
         state.currentNodeId = snapshot.currentNodeId
         state.history = restoredHistory
         state.experimentAssignments = snapshot.experimentAssignments
+        state.abAssignmentsByNode = snapshot.abAssignments ?? [:]
         state.screenIndex = screenNodes.firstIndex(where: { $0.id == screen.id }) ?? 0
         lock.unlock()
 
@@ -499,13 +520,21 @@ final class NavigationController: @unchecked Sendable {
     private func processABTestNode(_ node: ABTestNode) {
         lock.lock()
 
-        // Check for existing assignment
+        // Check for existing assignment (sticky by experimentKey).
         var variantId = state.experimentAssignments[node.experimentKey]
+        // First bucketing of this node this session — gates the once-only
+        // exposure emit below (re-traversals reuse the sticky assignment).
+        let isFirstBucketing = (variantId == nil)
 
         if variantId == nil {
             // Select a new variant
             variantId = selectVariant(node.variants)
             state.experimentAssignments[node.experimentKey] = variantId
+            // Record node id → chosen variant id for in-flow A/B attribution so
+            // it can be stamped onto every event as `ab_assignments`.
+            if let variantId {
+                state.abAssignmentsByNode[node.id] = variantId
+            }
         }
 
         lock.unlock()
@@ -514,11 +543,17 @@ final class NavigationController: @unchecked Sendable {
 
         // Navigate to variant's target
         if let variant = node.variants.first(where: { $0.id == variantId }) {
-            navigationSubject.send(.experimentAssigned(
-                experimentKey: node.experimentKey,
-                variantId: variant.id,
-                variantLabel: variant.label
-            ))
+            // Emit the exposure ONCE per session per abTest node — only on the
+            // first bucketing. It's the per-variant denominator, so re-firing on
+            // every traversal would inflate it (the prior bug).
+            if isFirstBucketing {
+                navigationSubject.send(.experimentAssigned(
+                    nodeId: node.id,
+                    experimentKey: node.experimentKey,
+                    variantId: variant.id,
+                    variantLabel: variant.label
+                ))
+            }
             navigate(to: variant.targetNodeId)
         } else {
             Logger.shared.error("Variant not found: \(variantId ?? "nil")")
@@ -582,6 +617,6 @@ final class NavigationController: @unchecked Sendable {
 enum NavigationEvent: Sendable {
     case screenDisplayed(screen: ScreenNode, index: Int, transitionInfo: NavigationTransitionInfo)
     case navigatedBack(nodeId: String, transitionInfo: NavigationTransitionInfo)
-    case experimentAssigned(experimentKey: String, variantId: String, variantLabel: String?)
+    case experimentAssigned(nodeId: String, experimentKey: String, variantId: String, variantLabel: String?)
     case flowClosed(outcome: FlowOutcome)
 }

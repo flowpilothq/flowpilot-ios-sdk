@@ -97,6 +97,15 @@ public struct AnalyticsEvent: Codable, Sendable {
     /// Custom properties
     public let properties: [String: AnyCodable]?
 
+    /// Cumulative in-flow A/B test assignments for this session: a map of
+    /// abTest NODE id → chosen variant id. Stamped onto every event once any
+    /// in-flow abTest node has bucketed, so per-variant funnels are possible.
+    /// Omitted (nil) before any abTest node is hit and distinct from the
+    /// top-level `experiment_id`/`variant_id` columns, which stay reserved for
+    /// server-side experiments. Encoded as the JSON object `ab_assignments`;
+    /// `var` so the tracker can stamp it after the event is built.
+    public var abAssignments: [String: String]? = nil
+
     // MARK: CodingKeys
 
     enum CodingKeys: String, CodingKey {
@@ -129,6 +138,7 @@ public struct AnalyticsEvent: Codable, Sendable {
         case appVersion = "app_version"
         case country
         case properties
+        case abAssignments = "ab_assignments"
     }
 
     // MARK: Initialization
@@ -364,5 +374,5 @@ final class AnalyticsEventBuilder: @unchecked Sendable {
 // MARK: - SDK Version
 
 public enum FlowPilotSDK {
-    public static let version = "1.1.1"
+    public static let version = "1.3.0"
 }

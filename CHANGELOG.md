@@ -3,6 +3,11 @@
 All notable changes to the FlowPilot iOS SDK are documented here. This project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0]
+
+- In-flow A/B attribution: every analytics event now carries an `ab_assignments` map (abTest node id → chosen variant id) once any in-flow abTest node has bucketed, enabling per-variant funnels distinct from the server-side `experiment_id`/`variant_id` columns. The map is persisted with saved progress and reseeded on a resumed session.
+- Fix: an in-flow abTest exposure is now emitted only on first bucketing, so re-traversing the node no longer inflates the per-variant denominator.
+
 ## [1.2.0]
 
 - Picker (wheel) component, with an optional Imperial/Metric unit-system toggle and a shared centered header across grouped picker columns.

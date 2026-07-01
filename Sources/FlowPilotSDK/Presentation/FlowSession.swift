@@ -466,6 +466,11 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
             FlowProgressStore.shared.clear(flowId: flow.flowId, userId: progressUserId)
             return false
         }
+
+        // Reseed the tracker's in-flow A/B attribution from the restored
+        // snapshot so events emitted after resume still carry ab_assignments
+        // (the exposure events themselves are not re-fired on a sticky resume).
+        analyticsTracker?.restoreAbAssignments(navigationController.abAssignmentsByNode)
         return true
     }
 
@@ -631,8 +636,12 @@ public final class FlowSession: ObservableObject, @unchecked Sendable {
                 screenTransitionState = ScreenTransitionState(screen: screen, transitionInfo: transitionInfo)
             }
 
-        case .experimentAssigned(let experimentKey, let variantId, let variantLabel):
-            analyticsTracker?.trackExperimentAssigned(
+        case .experimentAssigned(let nodeId, let experimentKey, let variantId, let variantLabel):
+            // In-flow (client-side) A/B bucketing. Records node→variant into
+            // ab_assignments and does NOT touch the server-side experiment
+            // columns. Fired once per session per node by the navigation layer.
+            analyticsTracker?.trackInFlowExperimentAssigned(
+                nodeId: nodeId,
                 experimentKey: experimentKey,
                 variantId: variantId,
                 variantLabel: variantLabel

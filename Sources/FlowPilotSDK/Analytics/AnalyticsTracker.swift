@@ -18,6 +18,13 @@ final class AnalyticsTracker: @unchecked Sendable {
     private var variantName: String?
     private var deliverySource: FlowDeliverySource = .network
 
+    /// Cumulative in-flow A/B attribution for this session (abTest node id →
+    /// chosen variant id). Stamped onto EVERY event as `ab_assignments`. Reset
+    /// per flow/session in `configure`, appended on each in-flow bucketing, and
+    /// reseeded from the progress snapshot on a resumed session. Distinct from
+    /// the server-side `experimentId`/`variantId` columns above.
+    private var abAssignments: [String: String] = [:]
+
     // Timing
     private var flowStartTime: Date?
     private var screenStartTime: Date?
@@ -77,6 +84,17 @@ final class AnalyticsTracker: @unchecked Sendable {
         self.variantId = variantId
         self.variantName = variantName
         self.deliverySource = deliverySource
+        // New flow/session: start with no in-flow A/B attribution. A resumed
+        // session reseeds this via restoreAbAssignments after restore.
+        self.abAssignments = [:]
+    }
+
+    /// Reseed the cumulative in-flow A/B attribution map (e.g. after restoring
+    /// saved progress) so events emitted post-resume still carry `ab_assignments`.
+    func restoreAbAssignments(_ assignments: [String: String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.abAssignments = assignments
     }
 
     func setExternalCallback(_ callback: AnalyticsCallback?) {
@@ -235,9 +253,38 @@ final class AnalyticsTracker: @unchecked Sendable {
         flush()
     }
 
+    /// Server-side experiment exposure (resolver-assigned variant). Stamps the
+    /// real top-level `experiment_id`/`variant_id` columns — those stay reserved
+    /// for server-side experiments. Unchanged: the in-flow path uses
+    /// `trackInFlowExperimentAssigned` and `ab_assignments` instead.
     func trackExperimentAssigned(experimentKey: String, variantId: String, variantLabel: String?) {
         let event = buildEvent(eventType: .experimentAssigned)
             .withExperiment(experimentId: experimentKey, variantId: variantId, variantName: variantLabel)
+            .withProperties([
+                "experiment_key": experimentKey
+            ])
+            .build()
+
+        enqueue(event)
+    }
+
+    /// In-flow A/B exposure (client-side bucketing at an abTest node). Records
+    /// the node→variant choice into `abAssignments` BEFORE building the event so
+    /// the exposure itself (and every subsequent event) carries it via
+    /// `ab_assignments`. Deliberately does NOT overwrite the top-level
+    /// `experiment_id`/`variant_id` columns — in-flow attribution lives only in
+    /// `ab_assignments`. Fired once per session per node by the navigation layer.
+    func trackInFlowExperimentAssigned(
+        nodeId: String,
+        experimentKey: String,
+        variantId: String,
+        variantLabel: String?
+    ) {
+        lock.lock()
+        abAssignments[nodeId] = variantId
+        lock.unlock()
+
+        let event = buildEvent(eventType: .experimentAssigned)
             .withProperties([
                 "experiment_key": experimentKey
             ])
@@ -333,14 +380,21 @@ final class AnalyticsTracker: @unchecked Sendable {
     }
 
     private func enqueue(_ event: AnalyticsEvent) {
+        // Stamp the cumulative in-flow A/B attribution onto EVERY event. This is
+        // the single choke point all events flow through (auto, conversion,
+        // custom), so every one carries the accumulated map. Omitted (nil) until
+        // an abTest node has bucketed, so e.g. flow_start doesn't carry it.
+        var event = event
+        lock.lock()
+        let assignments = abAssignments
+        let callback = externalCallback
+        lock.unlock()
+        event.abAssignments = assignments.isEmpty ? nil : assignments
+
         // Send to batcher
         batcher.enqueue(event)
 
         // Also send to external callback
-        lock.lock()
-        let callback = externalCallback
-        lock.unlock()
-
         callback?(event)
     }
 
